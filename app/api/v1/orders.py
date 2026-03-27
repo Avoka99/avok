@@ -8,7 +8,7 @@ from app.schemas.payment import PaymentInitiate, PaymentResponse
 from app.services.order import OrderService
 from app.services.payment import PaymentService
 from app.services.escrow import EscrowService
-from app.models.user import User
+from app.models.user import User, UserRole
 
 router = APIRouter(prefix="/orders", tags=["orders"])
 
@@ -19,16 +19,16 @@ async def create_order(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
-    """Create a new order (buyer)."""
+    """Create a checkout session using the legacy orders endpoint."""
     order_service = OrderService(db)
     
-    # Only buyers can create orders
-    if current_user.role != "buyer":
-        raise HTTPException(status_code=403, detail="Only buyers can create orders")
+    # Only payers can create checkout sessions
+    if current_user.role != UserRole.BUYER:
+        raise HTTPException(status_code=403, detail="Only payers can create checkout sessions")
     
     order = await order_service.create_order(
         buyer_id=current_user.id,
-        **order_data.dict()
+        **order_data.model_dump()
     )
     
     return order
@@ -40,12 +40,12 @@ async def get_order(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
-    """Get order details."""
+    """Get checkout session details using the legacy orders endpoint."""
     order_service = OrderService(db)
     order = await order_service.get_order(order_reference)
     
     # Check permission
-    if current_user.id not in [order.buyer_id, order.seller_id] and current_user.role not in ["admin", "super_admin"]:
+    if current_user.id not in [order.buyer_id, order.seller_id] and current_user.role not in [UserRole.ADMIN, UserRole.SUPER_ADMIN]:
         raise HTTPException(status_code=403, detail="Permission denied")
     
     return order
@@ -58,7 +58,7 @@ async def list_orders(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
-    """List user's orders."""
+    """List the authenticated user's checkout sessions using the legacy orders endpoint."""
     order_service = OrderService(db)
     orders = await order_service.get_user_orders(current_user.id, skip, limit)
     return orders
@@ -71,21 +71,25 @@ async def initiate_payment(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
-    """Initiate payment for order."""
+    """Initiate payment for a checkout session using the legacy orders endpoint."""
     order_service = OrderService(db)
     payment_service = PaymentService(db)
     
     order = await order_service.get_order(order_reference)
     
-    # Verify user is the buyer
+    # Verify user is the payer
     if order.buyer_id != current_user.id:
-        raise HTTPException(status_code=403, detail="Only buyer can pay")
+        raise HTTPException(status_code=403, detail="Only the payer can fund this session")
     
     # Initiate payment
     result = await payment_service.initiate_payment(
         order_id=order.id,
+        funding_source=payment_data.funding_source,
+        payout_destination=payment_data.payout_destination,
+        buyer=current_user,
         momo_provider=payment_data.momo_provider,
-        momo_number=payment_data.momo_number
+        momo_number=payment_data.momo_number,
+        bank_reference=payment_data.bank_reference,
     )
     
     return result
@@ -97,18 +101,18 @@ async def generate_delivery_otp(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
-    """Generate OTP for delivery confirmation (seller)."""
+    """Generate OTP for delivery confirmation (registered recipient)."""
     order_service = OrderService(db)
     
     order = await order_service.get_order(order_reference)
     
-    # Verify user is the seller
+    # Verify user is the registered recipient
     if order.seller_id != current_user.id:
-        raise HTTPException(status_code=403, detail="Only seller can generate OTP")
+        raise HTTPException(status_code=403, detail="Only the registered recipient can generate OTP")
     
     otp = await order_service.generate_delivery_otp(order.id)
     
-    return {"otp": otp, "message": "OTP generated and sent to buyer"}
+    return {"otp": otp, "message": "OTP generated and sent to payer"}
 
 
 @router.post("/{order_reference}/delivery/confirm")
@@ -118,15 +122,15 @@ async def confirm_delivery(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
-    """Confirm delivery with OTP (seller)."""
+    """Confirm delivery with OTP (registered recipient)."""
     order_service = OrderService(db)
     escrow_service = EscrowService(db)
     
     order = await order_service.get_order(order_reference)
     
-    # Verify user is the seller
+    # Verify user is the registered recipient
     if order.seller_id != current_user.id:
-        raise HTTPException(status_code=403, detail="Only seller can confirm delivery")
+        raise HTTPException(status_code=403, detail="Only the registered recipient can confirm delivery")
     
     # Confirm delivery with OTP
     await escrow_service.confirm_delivery_with_otp(
@@ -144,15 +148,15 @@ async def manual_delivery_confirmation(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
-    """Manual delivery confirmation (buyer)."""
+    """Manual delivery confirmation (payer)."""
     order_service = OrderService(db)
     escrow_service = EscrowService(db)
     
     order = await order_service.get_order(order_reference)
     
-    # Verify user is the buyer
+    # Verify user is the payer
     if order.buyer_id != current_user.id:
-        raise HTTPException(status_code=403, detail="Only buyer can confirm delivery")
+        raise HTTPException(status_code=403, detail="Only the payer can confirm delivery")
     
     # Manually confirm delivery
     await order_service.confirm_delivery_manually(order.id)

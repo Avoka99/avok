@@ -8,8 +8,9 @@ from sqlalchemy import select, and_, func
 
 from app.core.exceptions import NotFoundError, ValidationError
 from app.core.config import settings
-from app.models.user import User
-from app.models.wallet import Wallet
+from app.core.finance import calculate_capped_fee, is_verified_account
+from app.models.user import User, UserRole
+from app.models.wallet import Wallet, WalletType
 from app.models.transaction import Transaction, TransactionType, TransactionStatus
 from app.models.order import Order, OrderStatus
 from app.services.notification import NotificationService
@@ -27,13 +28,55 @@ class WalletService:
     async def get_balance(self, user_id: int) -> dict:
         """Get user's wallet balance."""
         wallet = await self._get_wallet(user_id)
+        user = await self._get_user(user_id)
         
         return {
             "available_balance": wallet.available_balance,
             "pending_balance": wallet.pending_balance,
             "escrow_balance": wallet.escrow_balance,
-            "total_balance": wallet.available_balance + wallet.pending_balance + wallet.escrow_balance
+            "total_balance": wallet.available_balance + wallet.pending_balance + wallet.escrow_balance,
+            "is_verified_account": is_verified_account(user),
         }
+
+    async def deposit(
+        self,
+        user_id: int,
+        amount: float,
+        source_type: str,
+        source_reference: str,
+    ) -> Transaction:
+        """Deposit external funds into a verified Avok account."""
+        wallet = await self._get_wallet(user_id)
+        user = await self._get_user(user_id)
+
+        if not is_verified_account(user):
+            raise ValidationError("Complete phone and KYC verification before depositing into your Avok account")
+
+        fee_amount = calculate_capped_fee(
+            amount,
+            percent=settings.platform_fee_percent,
+            cap_amount=settings.external_transfer_fee_cap,
+        )
+        net_amount = amount - fee_amount
+
+        transaction = Transaction(
+            wallet_id=wallet.id,
+            transaction_type=TransactionType.DEPOSIT,
+            status=TransactionStatus.COMPLETED,
+            amount=amount,
+            fee_amount=fee_amount,
+            net_amount=net_amount,
+            reference=f"DEP-{uuid.uuid4().hex[:12].upper()}",
+            description=f"Deposit from {source_type}: {source_reference}",
+            extra_data={"source_type": source_type, "source_reference": source_reference},
+            completed_at=datetime.utcnow(),
+        )
+
+        self.db.add(transaction)
+        wallet.available_balance += net_amount
+        await self.db.commit()
+
+        return transaction
     
     async def get_transactions(
         self,
@@ -59,8 +102,10 @@ class WalletService:
         self,
         user_id: int,
         amount: float,
-        momo_number: str,
-        momo_provider: str
+        destination_type: str,
+        destination_reference: str,
+        momo_provider: Optional[str] = None,
+        bank_name: Optional[str] = None,
     ) -> Transaction:
         """Initiate withdrawal request."""
         wallet = await self._get_wallet(user_id)
@@ -71,15 +116,21 @@ class WalletService:
         if amount > wallet.available_balance:
             raise ValidationError("Insufficient balance")
         
-        # Calculate seller fee if applicable
         user = await self._get_user(user_id)
-        fee_amount = 0
-        
-        if user.role == "seller":
-            fee_amount = amount * (settings.seller_withdrawal_fee_percent / 100)
-            net_amount = amount - fee_amount
-        else:
-            net_amount = amount
+        if not is_verified_account(user):
+            raise ValidationError("Only verified Avok accounts can withdraw to mobile money or bank")
+
+        if destination_type == "momo" and not momo_provider:
+            raise ValidationError("momo_provider is required for mobile money withdrawals")
+        if destination_type == "bank" and not bank_name:
+            raise ValidationError("bank_name is required for bank withdrawals")
+
+        fee_amount = calculate_capped_fee(
+            amount,
+            percent=settings.seller_withdrawal_fee_percent,
+            cap_amount=settings.external_transfer_fee_cap,
+        )
+        net_amount = amount - fee_amount
         
         # Create withdrawal transaction
         transaction = Transaction(
@@ -90,8 +141,14 @@ class WalletService:
             fee_amount=fee_amount,
             net_amount=net_amount,
             reference=f"WDR-{uuid.uuid4().hex[:12].upper()}",
-            description=f"Withdrawal to {momo_provider} {momo_number}",
+            description=f"Withdrawal to {destination_type}: {destination_reference}",
             momo_provider=momo_provider,
+            momo_number=destination_reference if destination_type == "momo" else None,
+            extra_data={
+                "destination_type": destination_type,
+                "destination_reference": destination_reference,
+                "bank_name": bank_name,
+            },
         )
         
         self.db.add(transaction)
@@ -208,7 +265,7 @@ class WalletService:
         result = await self.db.execute(
             select(Wallet).where(
                 Wallet.user_id == user_id,
-                Wallet.wallet_type == "main"
+                Wallet.wallet_type == WalletType.MAIN
             )
         )
         wallet = result.scalar_one_or_none()

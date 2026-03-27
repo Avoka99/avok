@@ -10,43 +10,56 @@ from sqlalchemy.orm import selectinload
 
 from app.core.exceptions import NotFoundError, ValidationError, PermissionDeniedError
 from app.core.config import settings
+from app.core.finance import calculate_capped_fee, is_verified_account
 from app.core.security import generate_otp
 from app.models.order import Order, OrderStatus, DeliveryMethod
-from app.models.user import User
-from app.models.wallet import Wallet
+from app.models.user import User, UserRole, UserStatus
+from app.models.wallet import Wallet, WalletType
 from app.models.otp_delivery import OTPDelivery
 from app.models.transaction import Transaction
 from app.schemas.order import OrderCreate
 from app.services.notification import NotificationService
 from app.services.fraud_detection import FraudDetectionService
+from app.services.product_import import ProductImportService
 
 logger = logging.getLogger(__name__)
 
 
 class OrderService:
-    """Service for managing orders and deliveries."""
+    """Service for managing checkout sessions and delivery confirmations."""
     
     def __init__(self, db: AsyncSession):
         self.db = db
         self.notification_service = NotificationService(db)
         self.fraud_service = FraudDetectionService(db)
+        self.product_import_service = ProductImportService()
     
     async def create_order(
         self,
         buyer_id: int,
-        seller_id: int,
-        product_name: str,
+        recipient_id: Optional[int],
+        product_name: Optional[str],
         product_price: float,
         delivery_method: DeliveryMethod,
         product_description: Optional[str] = None,
-        shipping_address: Optional[str] = None
+        shipping_address: Optional[str] = None,
+        recipient_display_name: Optional[str] = None,
+        recipient_contact: Optional[str] = None,
+        payout_destination: str = "avok_account",
+        payout_reference: Optional[str] = None,
+        payout_account_name: Optional[str] = None,
+        payout_bank_name: Optional[str] = None,
+        product_url: Optional[str] = None,
+        auto_import_product_details: bool = True,
+        payment_source: str = "verified_account",
+        checkout_context: Optional[Dict] = None,
     ) -> Order:
         """
-        Create a new order.
+        Create a new checkout session.
         
         Args:
-            buyer_id: ID of the buyer
-            seller_id: ID of the seller
+            buyer_id: ID of the payer
+            recipient_id: ID of the payout recipient
             product_name: Name of the product
             product_price: Price of the product in GHS
             delivery_method: How the product will be delivered
@@ -56,19 +69,24 @@ class OrderService:
         Returns:
             Created Order object
         """
-        # Validate buyer and seller
+        # Validate payer and payout recipient
         buyer = await self._get_user(buyer_id)
-        seller = await self._get_user(seller_id)
-        
-        if not buyer.is_active:
-            raise ValidationError("Buyer account is not active")
-        
-        if not seller.is_active:
-            raise ValidationError("Seller account is not active")
-        
-        # Validate seller is actually a seller
-        if seller.role not in ["seller", "admin", "super_admin"]:
-            raise ValidationError("User is not a registered seller")
+
+        if buyer.status != UserStatus.ACTIVE:
+            raise ValidationError("Payer account is not active")
+
+        recipient = None
+        if recipient_id is not None:
+            recipient = await self._get_user(recipient_id)
+            if recipient.status != UserStatus.ACTIVE:
+                raise ValidationError("Recipient account is not active")
+            recipient_display_name = recipient.full_name
+            recipient_contact = recipient.phone_number
+            payout_destination = "avok_account"
+            payout_reference = str(recipient.id)
+            payout_account_name = recipient.full_name
+        elif payout_destination == "avok_account":
+            raise ValidationError("External recipients cannot use avok_account payout without an Avok user account")
         
         # Validate price
         if product_price <= 0:
@@ -81,29 +99,58 @@ class OrderService:
         if delivery_method == DeliveryMethod.SHIPPING and not shipping_address:
             raise ValidationError("Shipping address is required for shipping delivery")
         
-        # Calculate fees
-        platform_fee = product_price * (settings.platform_fee_percent / 100)
-        total_amount = product_price + platform_fee
+        imported_payload = None
+        if product_url and auto_import_product_details:
+            imported_payload = await self.product_import_service.extract(product_url)
+            product_name = product_name or imported_payload.get("product_name")
+            product_description = product_description or imported_payload.get("product_description")
+
+        if not product_name:
+            raise ValidationError("Product name is required")
+
+        entry_fee = 0.0 if payment_source == "verified_account" and is_verified_account(buyer) else calculate_capped_fee(
+            product_price,
+            percent=settings.platform_fee_percent,
+            cap_amount=settings.external_transfer_fee_cap,
+        )
+        total_amount = product_price + entry_fee
         
         # Check if buyer has sufficient balance (for future feature - if they pre-fund wallet)
         # For now, we'll allow orders even without balance since they'll pay via MoMo
         
-        # Generate unique order reference
+        # Generate unique checkout session reference
         order_reference = self._generate_order_reference()
         
         # Create order
         order = Order(
             order_reference=order_reference,
             buyer_id=buyer_id,
-            seller_id=seller_id,
+            seller_id=recipient_id,
+            seller_display_name=recipient_display_name,
+            seller_contact=recipient_contact,
+            payout_destination=payout_destination,
+            payout_reference=payout_reference,
+            payout_account_name=payout_account_name,
+            payout_bank_name=payout_bank_name,
             product_name=product_name,
             product_description=product_description,
             product_price=product_price,
-            platform_fee=platform_fee,
+            platform_fee=entry_fee,
+            entry_fee=entry_fee,
+            release_fee=0.0,
             total_amount=total_amount,
             escrow_status=OrderStatus.PENDING_PAYMENT,
             delivery_method=delivery_method,
-            shipping_address=shipping_address if delivery_method == DeliveryMethod.SHIPPING else None
+            shipping_address=shipping_address if delivery_method == DeliveryMethod.SHIPPING else shipping_address,
+            product_url=product_url,
+            source_site_name=imported_payload.get("source_site_name") if imported_payload else None,
+            imported_media=imported_payload.get("media") if imported_payload else None,
+            import_snapshot=imported_payload.get("snapshot") if imported_payload else None,
+            payment_source=payment_source,
+            payout_metadata={
+                "recipient_type": "registered_user" if recipient_id is not None else "external_recipient",
+                **(checkout_context or {}),
+            },
         )
         
         self.db.add(order)
@@ -113,12 +160,10 @@ class OrderService:
         fraud_check = await self._check_order_fraud(order)
         if fraud_check.get("is_suspicious"):
             logger.warning(f"Suspicious order detected: {order_reference}, flags: {fraud_check.get('flags')}")
-            # Don't block order, just log for now
-            order.metadata = {"fraud_flags": fraud_check.get("flags")}
         
         await self.db.commit()
         
-        logger.info(f"Order created: {order_reference} by buyer {buyer_id} from seller {seller_id}")
+        logger.info(f"Checkout session created: {order_reference} by payer {buyer_id} for payout destination {payout_destination}")
         
         # Send notifications
         await self.notification_service.send_order_confirmation(order)
@@ -317,21 +362,6 @@ class OrderService:
         elif new_status == OrderStatus.CANCELLED:
             order.completed_at = datetime.utcnow()
         
-        # Store status change metadata
-        if not hasattr(order, 'metadata') or not order.metadata:
-            order.metadata = {}
-        
-        if 'status_history' not in order.metadata:
-            order.metadata['status_history'] = []
-        
-        order.metadata['status_history'].append({
-            'from': old_status.value,
-            'to': new_status.value,
-            'by': user_id,
-            'reason': reason,
-            'timestamp': datetime.utcnow().isoformat()
-        })
-        
         await self.db.commit()
         
         logger.info(f"Order {order.order_reference} status updated: {old_status} -> {new_status}")
@@ -450,18 +480,12 @@ class OrderService:
         if user_id not in [order.buyer_id, order.seller_id]:
             # Only admins can cancel other people's orders
             user = await self._get_user(user_id)
-            if user.role not in ["admin", "super_admin"]:
+            if user.role not in [UserRole.ADMIN, UserRole.SUPER_ADMIN]:
                 raise PermissionDeniedError("Only buyer, seller, or admin can cancel orders")
         
         # Update order
         order.escrow_status = OrderStatus.CANCELLED
         order.completed_at = datetime.utcnow()
-        
-        # Store cancellation reason
-        if not hasattr(order, 'metadata') or not order.metadata:
-            order.metadata = {}
-        order.metadata['cancellation_reason'] = reason
-        order.metadata['cancelled_by'] = user_id
         
         await self.db.commit()
         
@@ -690,7 +714,7 @@ class OrderService:
         user = await self._get_user(user_id)
         
         # Admin can do anything
-        if user.role in ["admin", "super_admin"]:
+        if user.role in [UserRole.ADMIN, UserRole.SUPER_ADMIN]:
             return
         
         # Buyer permissions

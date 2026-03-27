@@ -50,6 +50,7 @@ def analyze_suspicious_activity(self):
         async with get_db_context() as db:
             from app.models.transaction import Transaction, TransactionStatus
             from app.models.user import User
+            from app.models.wallet import Wallet
             from sqlalchemy import select, func, and_
             
             # Find rapid transactions

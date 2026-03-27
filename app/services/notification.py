@@ -103,34 +103,38 @@ class NotificationService:
         return notification
     
     async def send_order_confirmation(self, order: Order):
-        """Send order confirmation notification."""
+        """Send checkout session creation notification."""
         buyer = await self._get_user(order.buyer_id)
-        seller = await self._get_user(order.seller_id)
+        seller = await self._get_user(order.seller_id) if order.seller_id else None
         
         # SMS to buyer
-        buyer_message = f"Your order {order.order_reference} for {order.product_name} has been created. Amount: {order.total_amount} GHS"
+        buyer_message = f"Your checkout session {order.order_reference} for {order.product_name} has been created. Amount: {order.total_amount} GHS"
         await self.send_sms(buyer.phone_number, buyer_message)
         
         # Email to buyer if available
         if buyer.email:
             await self.send_email(
                 buyer.email,
-                f"Order Confirmation - {order.order_reference}",
-                f"Your order has been created. Total: {order.total_amount} GHS"
+                f"Checkout Session Created - {order.order_reference}",
+                f"Your checkout session has been created. Total: {order.total_amount} GHS"
             )
         
         # SMS to seller
-        seller_message = f"New order {order.order_reference} for {order.product_name}. Prepare for delivery."
-        await self.send_sms(seller.phone_number, seller_message)
+        if seller:
+            seller_message = f"New checkout session {order.order_reference} for {order.product_name}. Prepare for delivery."
+            await self.send_sms(seller.phone_number, seller_message)
+        elif order.seller_contact:
+            seller_message = f"Avok escrow created for {order.product_name}. You will receive payment at {order.payout_destination} after payer confirmation."
+            await self.send_sms(order.seller_contact, seller_message)
     
     async def send_payment_confirmation(self, order_id: int):
-        """Send payment confirmation notification."""
+        """Send checkout funding confirmation notification."""
         order = await self._get_order(order_id)
         buyer = await self._get_user(order.buyer_id)
-        seller = await self._get_user(order.seller_id)
+        seller = await self._get_user(order.seller_id) if order.seller_id else None
         
         # Buyer notification
-        buyer_message = f"Payment of {order.total_amount} GHS confirmed for order {order.order_reference}. Funds held in escrow."
+        buyer_message = f"Payment of {order.total_amount} GHS confirmed for checkout session {order.order_reference}. Funds held in escrow."
         await self.send_sms(buyer.phone_number, buyer_message)
         
         if buyer.email:
@@ -141,28 +145,41 @@ class NotificationService:
             )
         
         # Seller notification
-        seller_message = f"Payment confirmed for order {order.order_reference}. Proceed with delivery."
-        await self.send_sms(seller.phone_number, seller_message)
+        if seller:
+            seller_message = f"Payment confirmed for checkout session {order.order_reference}. Proceed with delivery."
+            await self.send_sms(seller.phone_number, seller_message)
+        elif order.seller_contact:
+            seller_message = f"Payment is now secured in Avok escrow for checkout session {order.order_reference}. Release will happen after delivery confirmation."
+            await self.send_sms(order.seller_contact, seller_message)
     
     async def send_payment_release(self, order: Order):
         """Send payment release notification."""
-        seller = await self._get_user(order.seller_id)
-        
-        seller_message = f"Payment of {order.product_price} GHS released to your wallet for order {order.order_reference}. (Fee: {order.product_price * 0.02} GHS)"
-        await self.send_sms(seller.phone_number, seller_message)
-        
-        if seller.email:
-            await self.send_email(
-                seller.email,
-                f"Payment Released - {order.order_reference}",
-                f"Payment of {order.product_price} GHS has been released to your wallet."
+        seller = await self._get_user(order.seller_id) if order.seller_id else None
+
+        if seller:
+            seller_message = (
+                f"Payment of {order.product_price} GHS released for checkout session {order.order_reference}. "
+                f"Release fee: {order.release_fee} GHS."
+            )
+            await self.send_sms(seller.phone_number, seller_message)
+
+            if seller.email:
+                await self.send_email(
+                    seller.email,
+                    f"Payment Released - {order.order_reference}",
+                    f"Payment of {order.product_price} GHS has been released. Fee charged: {order.release_fee} GHS."
+                )
+        elif order.seller_contact:
+            await self.send_sms(
+                order.seller_contact,
+                f"Avok released payment for checkout session {order.order_reference}. Net payout: {order.product_price - order.release_fee} GHS."
             )
     
     async def send_refund_notification(self, order: Order, reason: str):
         """Send refund notification."""
         buyer = await self._get_user(order.buyer_id)
         
-        buyer_message = f"Refund of {order.total_amount} GHS processed for order {order.order_reference}. Reason: {reason}"
+        buyer_message = f"Refund of {order.total_amount} GHS processed for checkout session {order.order_reference}. Reason: {reason}"
         await self.send_sms(buyer.phone_number, buyer_message)
         
         if buyer.email:
@@ -175,11 +192,14 @@ class NotificationService:
     async def send_dispute_created(self, dispute):
         """Send dispute creation notification."""
         buyer = await self._get_user(dispute.buyer_id)
-        seller = await self._get_user(dispute.seller_id)
-        
-        # Notify seller
-        seller_message = f"Dispute opened for order {dispute.order.order_reference}. Reason: {dispute.dispute_type.value}. Please check the app for details."
-        await self.send_sms(seller.phone_number, seller_message)
+        seller = await self._get_user(dispute.seller_id) if dispute.seller_id else None
+
+        # Notify payout recipient
+        seller_message = f"Dispute opened for checkout session {dispute.order.order_reference}. Reason: {dispute.dispute_type.value}. Please check the app for details."
+        if seller:
+            await self.send_sms(seller.phone_number, seller_message)
+        elif dispute.order and dispute.order.seller_contact:
+            await self.send_sms(dispute.order.seller_contact, seller_message)
         
         # Notify buyer
         buyer_message = f"Dispute #{dispute.dispute_reference} opened. We'll review and get back to you shortly."
@@ -188,7 +208,7 @@ class NotificationService:
     async def send_dispute_resolved(self, dispute):
         """Send dispute resolution notification."""
         buyer = await self._get_user(dispute.buyer_id)
-        seller = await self._get_user(dispute.seller_id)
+        seller = await self._get_user(dispute.seller_id) if dispute.seller_id else None
         
         resolution_messages = {
             "resolved_buyer_wins": "Dispute resolved in your favor. Full refund processed.",
@@ -199,8 +219,11 @@ class NotificationService:
         buyer_message = resolution_messages.get(dispute.status.value, "Dispute resolved")
         seller_message = resolution_messages.get(dispute.status.value, "Dispute resolved")
         
-        await self.send_sms(buyer.phone_number, f"Order {dispute.order.order_reference}: {buyer_message}")
-        await self.send_sms(seller.phone_number, f"Order {dispute.order.order_reference}: {seller_message}")
+        await self.send_sms(buyer.phone_number, f"Checkout session {dispute.order.order_reference}: {buyer_message}")
+        if seller:
+            await self.send_sms(seller.phone_number, f"Checkout session {dispute.order.order_reference}: {seller_message}")
+        elif dispute.order and dispute.order.seller_contact:
+            await self.send_sms(dispute.order.seller_contact, f"Checkout session {dispute.order.order_reference}: {seller_message}")
     
     async def send_withdrawal_initiated(self, phone_number: str, amount: float, reference: str):
         """Send withdrawal initiation notification."""
@@ -232,14 +255,14 @@ class NotificationService:
         order = await self._get_order(order_id)
         buyer = await self._get_user(order.buyer_id)
         
-        message = f"Payment for order {order.order_reference} failed. Please try again."
+        message = f"Payment for checkout session {order.order_reference} failed. Please try again."
         await self.send_sms(buyer.phone_number, message)
     
     async def send_delivery_otp(self, order: Order, otp: str):
         """Send delivery OTP to buyer."""
         buyer = await self._get_user(order.buyer_id)
         
-        message = f"Delivery OTP for order {order.order_reference}: {otp}. Provide this to the delivery agent or seller."
+        message = f"Delivery OTP for checkout session {order.order_reference}: {otp}. Provide this to the delivery agent or payout recipient."
         await self.send_sms(buyer.phone_number, message)
         
         if buyer.email:
@@ -254,11 +277,11 @@ class NotificationService:
         buyer = await self._get_user(order.buyer_id)
         
         if days_remaining == 7:
-            message = f"Reminder: Your order {order.order_reference} will auto-release in 7 days if not confirmed."
+            message = f"Reminder: Your checkout session {order.order_reference} will auto-release in 7 days if not confirmed."
         elif days_remaining == 3:
-            message = f"URGENT: Your order {order.order_reference} will auto-release in 3 days. Confirm delivery or open dispute."
+            message = f"URGENT: Your checkout session {order.order_reference} will auto-release in 3 days. Confirm delivery or open dispute."
         elif days_remaining == 1:
-            message = f"FINAL WARNING: Your order {order.order_reference} will auto-release in 24 hours. Take action now!"
+            message = f"FINAL WARNING: Your checkout session {order.order_reference} will auto-release in 24 hours. Take action now!"
         else:
             return
         

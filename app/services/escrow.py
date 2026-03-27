@@ -7,8 +7,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, update
 
 from app.core.exceptions import EscrowError, NotFoundError
-from app.models.order import Order, OrderStatus
-from app.models.wallet import Wallet
+from app.core.finance import calculate_capped_fee, is_verified_account
+from app.models.order import DeliveryMethod, Order, OrderStatus
+from app.models.wallet import Wallet, WalletType
 from app.models.transaction import Transaction, TransactionType, TransactionStatus
 from app.models.user import User
 from app.core.config import settings
@@ -46,12 +47,12 @@ class EscrowService:
             order_reference=order_reference,
             buyer_id=buyer_id,
             seller_id=seller_id,
-            product_name="",  # Will be updated
+            product_name="Escrow Order",
             product_price=product_price,
             platform_fee=platform_fee,
             total_amount=total_amount,
             escrow_status=OrderStatus.PENDING_PAYMENT,
-            delivery_method=None,  # Will be updated
+            delivery_method=DeliveryMethod.PICKUP,
         )
         
         self.db.add(order)
@@ -63,16 +64,20 @@ class EscrowService:
     async def hold_funds_in_escrow(
         self,
         order_id: int,
-        transaction_reference: str
+        transaction_reference: str,
+        payment_source: str = "verified_account",
+        gross_amount: Optional[float] = None,
+        fee_amount: Optional[float] = None,
     ) -> Transaction:
-        """Hold buyer's funds in escrow after payment confirmation."""
+        """Hold payer funds in escrow after payment confirmation."""
         order = await self._get_order(order_id)
         
         if order.escrow_status != OrderStatus.PENDING_PAYMENT:
             raise EscrowError(f"Invalid order status: {order.escrow_status}")
         
-        # Get buyer's wallet
         buyer_wallet = await self._get_wallet(order.buyer_id)
+        gross_amount = gross_amount if gross_amount is not None else order.total_amount
+        fee_amount = fee_amount if fee_amount is not None else order.entry_fee
         
         # Create transaction record
         transaction = Transaction(
@@ -80,23 +85,30 @@ class EscrowService:
             order_id=order.id,
             transaction_type=TransactionType.ESCROW_HOLD,
             status=TransactionStatus.COMPLETED,
-            amount=order.total_amount,
-            fee_amount=order.platform_fee,
+            amount=gross_amount,
+            fee_amount=fee_amount,
             net_amount=order.product_price,
             reference=transaction_reference,
-            description=f"Escrow hold for order {order.order_reference}"
+            description=f"Escrow hold for checkout session {order.order_reference}",
+            extra_data={"payment_source": payment_source},
         )
         
         self.db.add(transaction)
         
         # Update wallet balances
-        buyer_wallet.escrow_balance += order.total_amount
-        buyer_wallet.available_balance -= order.total_amount
+        buyer_wallet.escrow_balance += gross_amount
+        if payment_source == "verified_account":
+            if buyer_wallet.available_balance < gross_amount:
+                raise EscrowError("Insufficient verified account balance for escrow funding")
+            buyer_wallet.available_balance -= gross_amount
         
         # Update order status
         order.escrow_status = OrderStatus.PAYMENT_CONFIRMED
         order.escrow_held_at = datetime.utcnow()
         order.escrow_release_date = datetime.utcnow() + timedelta(days=settings.escrow_release_days)
+        order.payment_source = payment_source
+        order.entry_fee = fee_amount
+        order.total_amount = gross_amount
         
         await self.db.commit()
         
@@ -124,48 +136,84 @@ class EscrowService:
         order_id: int,
         admin_approved: bool = False
     ) -> Transaction:
-        """Release funds from escrow to seller."""
+        """Release funds from escrow to the payout recipient."""
         order = await self._get_order(order_id)
-        
-        if order.escrow_status not in [OrderStatus.DELIVERED, OrderStatus.COMPLETED]:
+
+        if order.escrow_status == OrderStatus.COMPLETED:
+            raise EscrowError("Funds have already been released for this checkout session")
+        if order.escrow_status == OrderStatus.REFUNDED:
+            raise EscrowError("Cannot release funds for a refunded checkout session")
+        if order.escrow_status != OrderStatus.DELIVERED:
             raise EscrowError(f"Cannot release funds for order in status: {order.escrow_status}")
+        if not order.escrow_account_active:
+            raise EscrowError("Escrow is already closed for this checkout session")
         
-        # Get wallets
-        seller_wallet = await self._get_wallet(order.seller_id)
-        
-        # Calculate seller fee (2% at withdrawal)
-        seller_fee = order.product_price * (settings.seller_withdrawal_fee_percent / 100)
-        net_seller_amount = order.product_price - seller_fee
+        buyer_wallet = await self._get_wallet(order.buyer_id)
+        seller_wallet = await self._get_wallet(order.seller_id) if order.seller_id else None
+
+        existing_release = await self.db.execute(
+            select(Transaction).where(
+                Transaction.order_id == order.id,
+                Transaction.transaction_type == TransactionType.ESCROW_RELEASE,
+                Transaction.status == TransactionStatus.COMPLETED,
+            )
+        )
+        if existing_release.scalar_one_or_none():
+            raise EscrowError("Escrow release already exists for this checkout session")
+
+        if buyer_wallet.escrow_balance < order.total_amount:
+            raise EscrowError("Escrow balance is insufficient to release these funds")
+
+        release_fee = 0.0
+        if order.payout_destination in {"momo", "bank"}:
+            release_fee = calculate_capped_fee(
+                order.product_price,
+                percent=settings.seller_withdrawal_fee_percent,
+                cap_amount=settings.external_transfer_fee_cap,
+            )
+
+        net_seller_amount = order.product_price - release_fee
+        if net_seller_amount < 0:
+            raise EscrowError("Release fee cannot exceed the product amount")
+        if order.payout_destination == "avok_account" and not seller_wallet:
+            raise EscrowError("An Avok payout destination requires a registered recipient wallet")
         
         # Create transaction
         transaction = Transaction(
-            wallet_id=seller_wallet.id,
+            wallet_id=seller_wallet.id if seller_wallet else None,
             order_id=order.id,
             transaction_type=TransactionType.ESCROW_RELEASE,
             status=TransactionStatus.COMPLETED,
             amount=order.product_price,
-            fee_amount=seller_fee,
+            fee_amount=release_fee,
             net_amount=net_seller_amount,
             reference=f"REL-{order.order_reference}-{uuid.uuid4().hex[:8]}",
-            description=f"Escrow release for order {order.order_reference}"
+            description=f"Escrow release for checkout session {order.order_reference}",
+            extra_data={
+                "payout_destination": order.payout_destination,
+                "payout_reference": order.payout_reference,
+                "external_recipient": order.seller_id is None,
+            },
         )
         
         self.db.add(transaction)
         
         # Update balances
-        buyer_wallet = await self._get_wallet(order.buyer_id)
         buyer_wallet.escrow_balance -= order.total_amount
-        
-        seller_wallet.available_balance += net_seller_amount
-        seller_wallet.pending_balance += seller_fee
+
+        if seller_wallet and order.payout_destination == "avok_account":
+            seller_wallet.available_balance += net_seller_amount
         
         # Update order
         order.escrow_status = OrderStatus.COMPLETED
         order.completed_at = datetime.utcnow()
+        order.release_fee = release_fee
+        order.escrow_account_active = False
+        order.escrow_closed_at = datetime.utcnow()
         
         await self.db.commit()
         
-        logger.info(f"Funds released to seller for order {order.order_reference}: {net_seller_amount} GHS")
+        logger.info(f"Funds released for checkout session {order.order_reference}: {net_seller_amount} GHS")
         
         # Send notifications
         await self.notification_service.send_payment_release(order)
@@ -181,11 +229,29 @@ class EscrowService:
         """Refund buyer from escrow (full refund, no fees)."""
         order = await self._get_order(order_id)
         
+        if order.escrow_status == OrderStatus.COMPLETED:
+            raise EscrowError("Cannot refund a checkout session that has already been released")
+        if order.escrow_status == OrderStatus.REFUNDED:
+            raise EscrowError("This checkout session has already been refunded")
         if order.escrow_status not in [OrderStatus.PAYMENT_CONFIRMED, OrderStatus.DISPUTED]:
             raise EscrowError(f"Cannot refund order in status: {order.escrow_status}")
+        if not order.escrow_account_active:
+            raise EscrowError("Escrow is already closed for this checkout session")
         
         # Get buyer's wallet
         buyer_wallet = await self._get_wallet(order.buyer_id)
+        if buyer_wallet.escrow_balance < order.total_amount:
+            raise EscrowError("Escrow balance is insufficient to process this refund")
+
+        existing_refund = await self.db.execute(
+            select(Transaction).where(
+                Transaction.order_id == order.id,
+                Transaction.transaction_type == TransactionType.REFUND,
+                Transaction.status == TransactionStatus.COMPLETED,
+            )
+        )
+        if existing_refund.scalar_one_or_none():
+            raise EscrowError("Refund already exists for this checkout session")
         
         # Create refund transaction
         transaction = Transaction(
@@ -197,7 +263,7 @@ class EscrowService:
             fee_amount=0,
             net_amount=order.total_amount,
             reference=f"REF-{order.order_reference}-{uuid.uuid4().hex[:8]}",
-            description=f"Refund for order {order.order_reference}: {reason}"
+            description=f"Refund for checkout session {order.order_reference}: {reason}"
         )
         
         self.db.add(transaction)
@@ -208,6 +274,8 @@ class EscrowService:
         
         # Update order
         order.escrow_status = OrderStatus.REFUNDED
+        order.escrow_account_active = False
+        order.escrow_closed_at = datetime.utcnow()
         
         await self.db.commit()
         
@@ -283,7 +351,7 @@ class EscrowService:
         result = await self.db.execute(
             select(Wallet).where(
                 Wallet.user_id == user_id,
-                Wallet.wallet_type == "main"
+                Wallet.wallet_type == WalletType.MAIN
             )
         )
         wallet = result.scalar_one_or_none()

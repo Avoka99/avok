@@ -58,7 +58,7 @@ def retry_failed_notifications(self):
     """Retry failed notifications."""
     async def _retry():
         async with get_db_context() as db:
-            from app.models.notification import Notification, NotificationStatus
+            from app.models.notification import Notification, NotificationStatus, NotificationType
             from sqlalchemy import select, and_
             
             # Get failed notifications to retry
@@ -77,12 +77,12 @@ def retry_failed_notifications(self):
             
             for notification in notifications:
                 try:
-                    if notification.notification_type == "sms":
+                    if notification.notification_type == NotificationType.SMS:
                         await notification_service.send_sms(
                             notification.recipient,
                             notification.content
                         )
-                    elif notification.notification_type == "email":
+                    elif notification.notification_type == NotificationType.EMAIL:
                         await notification_service.send_email(
                             notification.recipient,
                             notification.title,

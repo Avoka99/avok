@@ -1,4 +1,24 @@
-version: '3.8'
+# Local dev stack: DEBUG/docs/sandbox default ON here so a production-style root `.env`
+# does not disable Swagger or payment simulation inside containers. Override with:
+#   COMPOSE_DEBUG=false COMPOSE_OPENAPI=false docker compose up -d
+x-app-environment: &app-environment
+  DATABASE_URL: postgresql+asyncpg://avok_user:avok_pass@postgres:5432/avok_db
+  REDIS_URL: redis://redis:6379/0
+  CELERY_BROKER_URL: redis://redis:6379/1
+  CELERY_RESULT_BACKEND: redis://redis:6379/2
+  SECRET_KEY: ${SECRET_KEY:-docker-dev-secret-change-me-32-characters-min}
+  JWT_SECRET_KEY: ${JWT_SECRET_KEY:-docker-dev-jwt-secret-change-32-chars-min}
+  PAYMENT_WEBHOOK_SECRET: ${PAYMENT_WEBHOOK_SECRET:-docker-dev-payment-webhook-secret}
+  DEBUG: "${COMPOSE_DEBUG:-true}"
+  ENABLE_OPENAPI_DOCS: "${COMPOSE_OPENAPI:-true}"
+  ENABLE_PAYMENT_SANDBOX: "${COMPOSE_SANDBOX:-true}"
+  # Optional: MTN MoMo Collection (sandbox host example — use your MTN developer values)
+  # MTN_MOMO_BASE_URL: https://sandbox.momodeveloper.mtn.com
+  # MTN_MOMO_SUBSCRIPTION_KEY: ""
+  # MTN_MOMO_API_USER: ""
+  # MTN_MOMO_API_KEY: ""
+  # MTN_MOMO_TARGET_ENVIRONMENT: sandbox
+  # MTN_MOMO_CURRENCY: EUR
 
 services:
   postgres:
@@ -36,8 +56,7 @@ services:
     ports:
       - "8000:8000"
     environment:
-      - DATABASE_URL=postgresql+asyncpg://avok_user:avok_pass@postgres:5432/avok_db
-      - REDIS_URL=redis://redis:6379/0
+      <<: *app-environment
     depends_on:
       postgres:
         condition: service_healthy
@@ -45,13 +64,13 @@ services:
         condition: service_healthy
     volumes:
       - ./app:/app/app
+      - ./scripts:/app/scripts
     command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
 
   celery_worker:
     build: .
     environment:
-      - DATABASE_URL=postgresql+asyncpg://avok_user:avok_pass@postgres:5432/avok_db
-      - REDIS_URL=redis://redis:6379/0
+      <<: *app-environment
     depends_on:
       - postgres
       - redis
@@ -62,8 +81,7 @@ services:
   celery_beat:
     build: .
     environment:
-      - DATABASE_URL=postgresql+asyncpg://avok_user:avok_pass@postgres:5432/avok_db
-      - REDIS_URL=redis://redis:6379/0
+      <<: *app-environment
     depends_on:
       - postgres
       - redis

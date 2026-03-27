@@ -5,7 +5,7 @@ from datetime import datetime
 from app.api.dependencies import get_db, get_current_user
 from app.schemas.user import (
     UserCreate, UserLogin, UserResponse, Token, 
-    PhoneVerificationSend, PhoneVerificationRequest
+    PhoneVerificationSend, PhoneVerificationRequest, KYCSubmission
 )
 from app.services.auth import AuthService
 from app.core.security import create_access_token, create_refresh_token
@@ -69,3 +69,20 @@ async def verify_phone(
     auth_service = AuthService(db)
     await auth_service.verify_phone(request.phone_number, request.otp)
     return {"message": "Phone number verified successfully"}
+
+
+@router.post("/kyc", response_model=UserResponse)
+async def submit_kyc(
+    payload: KYCSubmission,
+    current_user=Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """Submit KYC details for verified account activation."""
+    auth_service = AuthService(db)
+    user = await auth_service.submit_kyc(
+        user_id=current_user.id,
+        ghana_card_number=payload.ghana_card_number,
+        ghana_card_image_url=payload.ghana_card_image,
+        selfie_image_url=payload.selfie_image,
+    )
+    return user

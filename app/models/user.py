@@ -73,7 +73,11 @@ class User(Base):
     disputes_as_buyer = relationship("Dispute", foreign_keys="Dispute.buyer_id", back_populates="buyer")
     disputes_as_seller = relationship("Dispute", foreign_keys="Dispute.seller_id", back_populates="seller")
     notifications = relationship("Notification", back_populates="user")
-    admin_actions = relationship("AdminAction", back_populates="admin")
+    admin_actions = relationship(
+        "AdminAction",
+        foreign_keys="AdminAction.target_user_id",
+        back_populates="target_user",
+    )
     
     # Indexes
     __table_args__ = (

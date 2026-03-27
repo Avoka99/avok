@@ -11,7 +11,7 @@ from app.core.exceptions import DisputeError, NotFoundError, PermissionDeniedErr
 from app.core.config import settings
 from app.models.dispute import Dispute, DisputeStatus, DisputeType
 from app.models.order import Order, OrderStatus
-from app.models.user import User
+from app.models.user import User, UserRole
 from app.models.admin_action import AdminAction, AdminActionType, AdminActionStatus
 from app.services.escrow import EscrowService
 from app.services.notification import NotificationService
@@ -41,15 +41,15 @@ class DisputeService:
         order = await self._get_order_by_reference(order_reference)
         
         if order.buyer_id != buyer_id:
-            raise PermissionDeniedError("Only buyer can open dispute")
+            raise PermissionDeniedError("Only the payer can open a dispute")
         
         if order.escrow_status not in [OrderStatus.PAYMENT_CONFIRMED, OrderStatus.SHIPPED]:
-            raise DisputeError(f"Cannot open dispute for order in status: {order.escrow_status}")
+            raise DisputeError(f"Cannot open dispute for checkout session in status: {order.escrow_status}")
         
         # Check if dispute already exists
         existing = await self._get_dispute_by_order(order.id)
         if existing:
-            raise DisputeError("Dispute already exists for this order")
+            raise DisputeError("Dispute already exists for this checkout session")
         
         # Update order status
         order.escrow_status = OrderStatus.DISPUTED
@@ -80,7 +80,7 @@ class DisputeService:
         await self.notification_service.send_dispute_created(dispute)
         await self._notify_admins_new_dispute(dispute)
         
-        logger.info(f"Dispute created: {dispute.dispute_reference} for order {order_reference}")
+        logger.info(f"Dispute created: {dispute.dispute_reference} for checkout session {order_reference}")
         
         return dispute
     
@@ -131,7 +131,7 @@ class DisputeService:
         dispute = await self._get_dispute(dispute_id)
         admin = await self._get_user(admin_id)
         
-        if admin.role not in ["admin", "super_admin"]:
+        if admin.role not in [UserRole.ADMIN, UserRole.SUPER_ADMIN]:
             raise PermissionDeniedError("Only admins can resolve disputes")
         
         # Create admin action for approval
@@ -157,7 +157,7 @@ class DisputeService:
         await self.db.commit()
         
         # Auto-approve if super admin and only 1 approval needed
-        if admin.role == "super_admin" and settings.min_admin_approvals == 1:
+        if admin.role == UserRole.SUPER_ADMIN and settings.min_admin_approvals == 1:
             await self.approve_dispute_resolution(admin_action.id, admin_id)
         
         logger.info(f"Dispute resolution initiated: {dispute.dispute_reference}")
@@ -173,7 +173,7 @@ class DisputeService:
         admin_action = await self._get_admin_action(admin_action_id)
         admin = await self._get_user(admin_id)
         
-        if admin.role not in ["admin", "super_admin"]:
+        if admin.role not in [UserRole.ADMIN, UserRole.SUPER_ADMIN]:
             raise PermissionDeniedError("Only admins can approve")
         
         # Check if already approved
@@ -206,20 +206,26 @@ class DisputeService:
         resolution = admin_action.action_data.get("resolution")
         notes = admin_action.action_data.get("notes")
         
-        if resolution == "buyer_wins":
-            # Full refund to buyer
+        normalized_resolution = {
+            "buyer_wins": "payer_wins",
+            "seller_wins": "recipient_wins",
+        }.get(resolution, resolution)
+
+        if normalized_resolution == "payer_wins":
+            # Full refund to payer
             await self.escrow_service.refund_buyer(
                 dispute.order_id,
-                f"Dispute resolved in buyer's favor: {notes}",
+                f"Dispute resolved in payer's favor: {notes}",
                 admin_action.id
             )
             dispute.status = DisputeStatus.RESOLVED_BUYER_WINS
             
-            # Flag seller for potential fraud
-            await self.fraud_service.flag_user(dispute.seller_id, "dispute_lost")
+            # Flag recipient for potential fraud
+            if dispute.seller_id:
+                await self.fraud_service.flag_user(dispute.seller_id, "dispute_lost")
             
-        elif resolution == "seller_wins":
-            # Release funds to seller
+        elif normalized_resolution == "recipient_wins":
+            # Release funds to recipient
             order = await self._get_order(dispute.order_id)
             order.escrow_status = OrderStatus.DELIVERED
             await self.db.commit()
@@ -230,7 +236,7 @@ class DisputeService:
             )
             dispute.status = DisputeStatus.RESOLVED_SELLER_WINS
             
-        elif resolution == "refund":
+        elif normalized_resolution == "refund":
             # Full refund
             await self.escrow_service.refund_buyer(
                 dispute.order_id,
@@ -252,7 +258,7 @@ class DisputeService:
         # Notify parties
         await self.notification_service.send_dispute_resolved(dispute)
         
-        logger.info(f"Dispute {dispute.dispute_reference} resolved: {resolution}")
+        logger.info(f"Dispute {dispute.dispute_reference} resolved: {normalized_resolution}")
     
     async def _get_dispute(self, dispute_id: int) -> Dispute:
         """Get dispute by ID."""

@@ -1,13 +1,12 @@
-from fastapi.staticfiles import StaticFiles
-import os
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 import logging
 import time
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
-from app.core.database import init_db, close_db
+from app.core.database import init_db, close_db, get_db
 from app.core.exceptions import AvokException
 from app.api.v1.router import api_router
 from app.api.middleware.audit_log import AuditLogMiddleware
@@ -15,11 +14,12 @@ from app.api.middleware.rate_limit import RateLimitMiddleware
 
 logger = logging.getLogger(__name__)
 
+_openapi = settings.debug or settings.enable_openapi_docs
 app = FastAPI(
     title=settings.app_name,
     version="1.0.0",
-    docs_url="/docs" if settings.debug else None,
-    redoc_url="/redoc" if settings.debug else None
+    docs_url="/docs" if _openapi else None,
+    redoc_url="/redoc" if _openapi else None,
 )
 
 # CORS
@@ -63,7 +63,32 @@ async def avok_exception_handler(request: Request, exc: AvokException):
         }
     )
 
+# Add these test endpoints
+@app.get("/")
+async def root():
+    """Root endpoint for quick server checks."""
+    return {
+        "message": f"{settings.app_name} API is running",
+        "status": "ok",
+        "health": "/health",
+        "api_prefix": settings.api_v1_prefix,
+        "docs": "/docs" if (settings.debug or settings.enable_openapi_docs) else None,
+    }
 
+
+@app.get("/test")
+async def test():
+    return {"message": "Test endpoint working!", "status": "ok"}
+
+@app.get("/test/db")
+async def test_db(db: AsyncSession = Depends(get_db)):
+    """Test database connection"""
+    try:
+        from sqlalchemy import text
+        result = await db.execute(text("SELECT 1"))
+        return {"status": "success", "message": "Database connected"}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
 # Include API routes
 app.include_router(api_router, prefix=settings.api_v1_prefix)
 

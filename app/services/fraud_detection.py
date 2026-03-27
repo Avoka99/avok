@@ -5,7 +5,7 @@ from datetime import datetime, timedelta
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, and_, func
 
-from app.models.user import User
+from app.models.user import KYCStatus, User
 from app.models.order import Order, OrderStatus
 from app.models.dispute import Dispute, DisputeStatus
 from app.models.transaction import Transaction
@@ -87,7 +87,7 @@ class FraudDetectionService:
             flags.append("Excessive disputes")
         
         # Check KYC status
-        if user.kyc_status != "verified":
+        if user.kyc_status != KYCStatus.VERIFIED:
             fraud_score += 20
             flags.append("Unverified KYC")
         

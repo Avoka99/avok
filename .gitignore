@@ -41,3 +41,6 @@ uploads/
 
 # Celery
 celerybeat-schedule
+.aider*
+node_modules/
+frontend/node_modules/

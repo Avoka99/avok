@@ -41,7 +41,7 @@ class Dispute(Base):
     
     order_id = Column(Integer, ForeignKey("orders.id", ondelete="CASCADE"), unique=True, nullable=False)
     buyer_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
-    seller_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    seller_id = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
     
     dispute_type = Column(Enum(DisputeType), nullable=False)
     description = Column(Text, nullable=False)
@@ -80,3 +80,11 @@ class Dispute(Base):
     
     def __repr__(self):
         return f"<Dispute {self.dispute_reference}: {self.dispute_type} - {self.status}>"
+
+    @property
+    def order_reference(self):
+        return self.order.order_reference if self.order else None
+
+    @property
+    def session_reference(self):
+        return self.order.order_reference if self.order else None

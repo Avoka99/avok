@@ -1,6 +1,6 @@
 from typing import Optional, List
 from pydantic_settings import BaseSettings, SettingsConfigDict
-from pydantic import Field, validator
+from pydantic import Field, field_validator
 
 
 class Settings(BaseSettings):
@@ -8,6 +8,11 @@ class Settings(BaseSettings):
     app_name: str = Field(default="Avok", env="APP_NAME")
     app_env: str = Field(default="development", env="APP_ENV")
     debug: bool = Field(default=False, env="DEBUG")
+    enable_openapi_docs: bool = Field(
+        default=False,
+        env="ENABLE_OPENAPI_DOCS",
+        description="Expose /docs and /redoc even when DEBUG is false (e.g. internal staging).",
+    )
     secret_key: str = Field(..., env="SECRET_KEY")
     api_v1_prefix: str = Field(default="/api/v1", env="API_V1_PREFIX")
     
@@ -51,7 +56,8 @@ class Settings(BaseSettings):
     escrow_reminder_day_2: int = Field(default=10, env="ESCROW_REMINDER_DAY_2")
     escrow_reminder_day_3: int = Field(default=13, env="ESCROW_REMINDER_DAY_3")
     platform_fee_percent: float = Field(default=1.0, env="PLATFORM_FEE_PERCENT")
-    seller_withdrawal_fee_percent: float = Field(default=2.0, env="SELLER_WITHDRAWAL_FEE_PERCENT")
+    seller_withdrawal_fee_percent: float = Field(default=1.0, env="SELLER_WITHDRAWAL_FEE_PERCENT")
+    external_transfer_fee_cap: float = Field(default=30.0, env="EXTERNAL_TRANSFER_FEE_CAP")
     withdrawal_delay_hours: int = Field(default=24, env="WITHDRAWAL_DELAY_HOURS")
     
     # Admin
@@ -62,6 +68,16 @@ class Settings(BaseSettings):
     rate_limit_enabled: bool = Field(default=True, env="RATE_LIMIT_ENABLED")
     rate_limit_requests: int = Field(default=100, env="RATE_LIMIT_REQUESTS")
     rate_limit_period: int = Field(default=60, env="RATE_LIMIT_PERIOD")
+    payment_webhook_secret: Optional[str] = Field(default=None, env="PAYMENT_WEBHOOK_SECRET")
+    enable_payment_sandbox: bool = Field(default=False, env="ENABLE_PAYMENT_SANDBOX")
+
+    # MTN MoMo Collection (optional — when all set, MTN request-to-pay is used for provider mtn)
+    mtn_momo_base_url: Optional[str] = Field(default=None, env="MTN_MOMO_BASE_URL")
+    mtn_momo_subscription_key: Optional[str] = Field(default=None, env="MTN_MOMO_SUBSCRIPTION_KEY")
+    mtn_momo_api_user: Optional[str] = Field(default=None, env="MTN_MOMO_API_USER")
+    mtn_momo_api_key: Optional[str] = Field(default=None, env="MTN_MOMO_API_KEY")
+    mtn_momo_target_environment: str = Field(default="sandbox", env="MTN_MOMO_TARGET_ENVIRONMENT")
+    mtn_momo_currency: str = Field(default="EUR", env="MTN_MOMO_CURRENCY")
     
     model_config = SettingsConfigDict(
         env_file=".env",
@@ -69,13 +85,15 @@ class Settings(BaseSettings):
         case_sensitive=False
     )
     
-    @validator("database_url", pre=True)
+    @field_validator("database_url", mode="before")
+    @classmethod
     def validate_database_url(cls, v):
         if not v:
             raise ValueError("DATABASE_URL must be set")
         return v
-    
-    @validator("jwt_secret_key", pre=True)
+
+    @field_validator("jwt_secret_key", mode="before")
+    @classmethod
     def validate_jwt_secret(cls, v):
         if not v or v == "your-jwt-secret-key":
             raise ValueError("JWT_SECRET_KEY must be set to a strong secret")

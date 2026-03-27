@@ -3,9 +3,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from typing import List
 
 from app.api.dependencies import get_db, get_current_user
-from app.schemas.wallet import WalletBalance, TransactionResponse, WithdrawalRequest
+from app.schemas.wallet import WalletBalance, TransactionResponse, WithdrawalRequest, DepositRequest
 from app.services.wallet import WalletService
-from app.models.user import User
+from app.models.user import User, UserRole
 
 router = APIRouter(prefix="/wallet", tags=["wallet"])
 
@@ -34,6 +34,31 @@ async def get_transactions(
     return transactions
 
 
+@router.post("/deposit")
+async def deposit(
+    deposit_request: DepositRequest,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
+):
+    """Deposit money from mobile money or bank into a verified Avok account."""
+    wallet_service = WalletService(db)
+    transaction = await wallet_service.deposit(
+        user_id=current_user.id,
+        amount=deposit_request.amount,
+        source_type=deposit_request.source_type,
+        source_reference=deposit_request.source_reference,
+    )
+
+    return {
+        "message": "Deposit completed",
+        "transaction_reference": transaction.reference,
+        "amount": transaction.amount,
+        "net_amount": transaction.net_amount,
+        "fee": transaction.fee_amount,
+        "status": transaction.status,
+    }
+
+
 @router.post("/withdraw")
 async def withdraw(
     withdrawal: WithdrawalRequest,
@@ -43,15 +68,13 @@ async def withdraw(
     """Request withdrawal."""
     wallet_service = WalletService(db)
     
-    # Only sellers can withdraw (buyers can't withdraw escrow funds directly)
-    if current_user.role not in ["seller", "admin", "super_admin"]:
-        raise HTTPException(status_code=403, detail="Only sellers can withdraw funds")
-    
     transaction = await wallet_service.initiate_withdrawal(
         user_id=current_user.id,
         amount=withdrawal.amount,
-        momo_number=withdrawal.momo_number,
-        momo_provider=withdrawal.momo_provider
+        destination_type=withdrawal.destination_type,
+        destination_reference=withdrawal.destination_reference,
+        momo_provider=withdrawal.momo_provider,
+        bank_name=withdrawal.bank_name,
     )
     
     return {

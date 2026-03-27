@@ -9,6 +9,7 @@ from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 
 from app.core.security import get_password_hash, verify_password, generate_otp
+from app.core.redis_client import cache_delete, cache_get, cache_set
 from app.core.exceptions import ValidationError, UnauthorizedError, NotFoundError
 from app.models.user import User, UserStatus, KYCStatus, UserRole
 from app.models.wallet import Wallet, WalletType
@@ -21,6 +22,8 @@ logger = logging.getLogger(__name__)
 
 class AuthService:
     """Authentication and user management service."""
+
+    OTP_TTL_SECONDS = 10 * 60
     
     def __init__(self, db: AsyncSession):
         self.db = db
@@ -259,18 +262,18 @@ class AuthService:
     
     async def _store_otp(self, phone_number: str, otp: str):
         """Store OTP (placeholder - use Redis in production)."""
-        # In production, implement Redis with TTL of 10 minutes
-        pass
+        await cache_set(f"otp:{phone_number}", {"otp": otp}, ttl_seconds=self.OTP_TTL_SECONDS)
     
     async def _get_stored_otp(self, phone_number: str) -> Optional[str]:
         """Get stored OTP (placeholder)."""
-        # In production, retrieve from Redis
-        return None
+        data = await cache_get(f"otp:{phone_number}")
+        if not data:
+            return None
+        return data.get("otp")
     
     async def _clear_otp(self, phone_number: str):
         """Clear OTP (placeholder)."""
-        # In production, delete from Redis
-        pass
+        await cache_delete(f"otp:{phone_number}")
     
     async def _notify_admins_kyc_pending(self, user: User):
         """Notify admins about pending KYC."""

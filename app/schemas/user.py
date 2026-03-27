@@ -1,4 +1,4 @@
-from pydantic import BaseModel, EmailStr, Field, validator
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
 from datetime import datetime
 from typing import Optional, List
 from enum import Enum
@@ -16,12 +16,13 @@ class UserBase(BaseModel):
 class UserCreate(UserBase):
     password: str = Field(..., min_length=8)
     
-    @validator('password')
+    @field_validator("password")
+    @classmethod
     def validate_password(cls, v):
         if not any(c.isdigit() for c in v):
-            raise ValueError('Password must contain at least one digit')
+            raise ValueError("Password must contain at least one digit")
         if not any(c.isupper() for c in v):
-            raise ValueError('Password must contain at least one uppercase letter')
+            raise ValueError("Password must contain at least one uppercase letter")
         return v
 
 
@@ -37,14 +38,13 @@ class UserUpdate(BaseModel):
 
 
 class UserResponse(UserBase):
+    model_config = ConfigDict(from_attributes=True)
+
     id: int
     status: UserStatus
     kyc_status: KYCStatus
     is_phone_verified: bool
     created_at: datetime
-    
-    class Config:
-        from_attributes = True
 
 
 class Token(BaseModel):

@@ -1,21 +1,14 @@
 from fastapi import Depends, HTTPException, status
-from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.ext.asyncio import AsyncSession
-from typing import Optional
 
-from app.core.database import get_db_session
+from app.core.database import get_db
+from app.core.config import settings
 from app.core.security import decode_token
-from app.core.exceptions import UnauthorizedError
-from app.models.user import User
+from app.models.user import User, UserRole, UserStatus
 from app.services.auth import AuthService
 
 security = HTTPBearer()
-
-
-async def get_db() -> AsyncSession:
-    """Get database session."""
-    async for session in get_db_session():
-        return session
 
 
 async def get_current_user(
@@ -49,13 +42,13 @@ async def get_current_user(
             detail="User not found",
         )
     
-    if user.status == "suspended":
+    if user.status == UserStatus.SUSPENDED:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Account suspended",
         )
     
-    if user.status == "banned":
+    if user.status == UserStatus.BANNED:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Account banned",
@@ -68,7 +61,7 @@ async def get_current_admin(
     current_user: User = Depends(get_current_user)
 ) -> User:
     """Get current admin user."""
-    if current_user.role not in ["admin", "super_admin"]:
+    if current_user.role not in {UserRole.ADMIN, UserRole.SUPER_ADMIN}:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Admin privileges required",
@@ -80,9 +73,18 @@ async def get_current_seller(
     current_user: User = Depends(get_current_user)
 ) -> User:
     """Get current seller user."""
-    if current_user.role not in ["seller", "admin", "super_admin"]:
+    if current_user.role not in {UserRole.SELLER, UserRole.ADMIN, UserRole.SUPER_ADMIN}:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Seller privileges required",
         )
     return current_user
+
+
+def require_payment_sandbox_enabled() -> None:
+    """Reject sandbox simulate-payment endpoints unless explicitly enabled (e.g. local / staging)."""
+    if not settings.enable_payment_sandbox:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Sandbox payment simulation is disabled",
+        )

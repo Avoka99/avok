@@ -1,7 +1,7 @@
 from datetime import datetime, timedelta
 from typing import Optional
 from sqlalchemy import (
-    Column, Integer, String, Float, DateTime, ForeignKey, Enum, Text, Boolean, Index
+    Column, Integer, String, Float, DateTime, ForeignKey, Enum, Text, Boolean, Index, JSON
 )
 from sqlalchemy.orm import relationship
 import enum
@@ -34,19 +34,39 @@ class Order(Base):
     order_reference = Column(String(50), unique=True, nullable=False, index=True)
     
     buyer_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
-    seller_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    seller_id = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+
+    # External / guest seller payout details
+    seller_display_name = Column(String(255), nullable=True)
+    seller_contact = Column(String(255), nullable=True)
+    payout_destination = Column(String(50), default="avok_account", nullable=False)
+    payout_reference = Column(String(255), nullable=True)
+    payout_account_name = Column(String(255), nullable=True)
+    payout_bank_name = Column(String(255), nullable=True)
+    payout_metadata = Column(JSON, nullable=True)
     
     # Product details
     product_name = Column(String(255), nullable=False)
     product_description = Column(Text)
     product_price = Column(Float, nullable=False)
-    platform_fee = Column(Float, nullable=False)  # 1% of product price
-    total_amount = Column(Float, nullable=False)  # product_price + platform_fee
+    platform_fee = Column(Float, nullable=False)
+    total_amount = Column(Float, nullable=False)
+    entry_fee = Column(Float, default=0.0, nullable=False)
+    release_fee = Column(Float, default=0.0, nullable=False)
+    payment_source = Column(String(50), default="verified_account", nullable=False)
+
+    # Imported product/source details
+    product_url = Column(Text, nullable=True)
+    source_site_name = Column(String(255), nullable=True)
+    imported_media = Column(JSON, nullable=True)
+    import_snapshot = Column(JSON, nullable=True)
     
     # Escrow
     escrow_status = Column(Enum(OrderStatus), default=OrderStatus.PENDING_PAYMENT, nullable=False)
     escrow_release_date = Column(DateTime, nullable=True)  # Auto-release after 14 days
     escrow_held_at = Column(DateTime, nullable=True)
+    escrow_account_active = Column(Boolean, default=True, nullable=False)
+    escrow_closed_at = Column(DateTime, nullable=True)
     
     # Delivery
     delivery_method = Column(Enum(DeliveryMethod), nullable=False)
@@ -93,3 +113,27 @@ class Order(Base):
     
     def __repr__(self):
         return f"<Order {self.order_reference}: {self.product_name} - {self.escrow_status}>"
+
+    @property
+    def session_reference(self) -> str:
+        return self.order_reference
+
+    @property
+    def payer_id(self) -> int:
+        return self.buyer_id
+
+    @property
+    def recipient_id(self) -> Optional[int]:
+        return self.seller_id
+
+    @property
+    def recipient_display_name(self) -> Optional[str]:
+        return self.seller_display_name
+
+    @property
+    def recipient_contact(self) -> Optional[str]:
+        return self.seller_contact
+
+    @property
+    def is_guest_checkout(self) -> bool:
+        return bool((self.payout_metadata or {}).get("guest_checkout", False))
