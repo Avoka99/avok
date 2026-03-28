@@ -1,7 +1,9 @@
+from app.services.kyc_provider import ExternalKYCProvider
 from datetime import datetime, timedelta
 from typing import Optional
 import logging
 import secrets
+import random
 import re
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -52,7 +54,8 @@ class AuthService:
             hashed_password=get_password_hash(user_data.password),
             full_name=user_data.full_name,
             role=user_data.role,
-            status=UserStatus.PENDING
+            status=UserStatus.PENDING,
+            avok_account_number=self._generate_account_number() if getattr(user_data, 'wants_avok_account', False) else None
         )
         
         self.db.add(user)
@@ -162,57 +165,72 @@ class AuthService:
     async def submit_kyc(
         self,
         user_id: int,
-        ghana_card_number: str,
-        ghana_card_image_url: str,
+        document_type: str,
+        document_number: str,
+        document_image_url: str,
         selfie_image_url: str
     ) -> User:
-        """Submit KYC documents."""
+        """Submit KYC documents with dynamic checks."""
         user = await self._get_user(user_id)
-        
         if not user:
             raise NotFoundError("User", user_id)
         
-        # Validate Ghana Card number
-        if not self._validate_ghana_card(ghana_card_number):
-            raise ValidationError("Invalid Ghana Card number format")
+        # Check historical reuse excluding DEACTIVATED
+        existing_matches = await self.db.execute(
+            select(User).where(User.national_id_number == document_number)
+        )
+        for existing in existing_matches.scalars().all():
+            if existing.id != user_id and existing.status != UserStatus.DEACTIVATED:
+                raise ValidationError("Document already registered to an active or banned account")
         
-        # Check if card already used
-        existing = await self._get_user_by_ghana_card(ghana_card_number)
-        if existing and existing.id != user_id:
-            raise ValidationError("Ghana Card number already registered")
+        # Abstract verification
+        external_result = await ExternalKYCProvider.verify_document_and_background(
+            document_type, document_number, document_image_url, selfie_image_url
+        )
         
-        user.ghana_card_number = ghana_card_number
-        user.ghana_card_image_url = ghana_card_image_url
+        user.national_id_type = document_type
+        user.national_id_number = document_number
+        user.national_id_image_url = document_image_url
         user.selfie_image_url = selfie_image_url
-        user.kyc_status = KYCStatus.PENDING
+        user.kyc_approvals = [] # Wipe old approvals
         
+        if external_result["status"] == "flagged":
+            user.is_flagged = True
+            user.kyc_status = KYCStatus.PENDING # Keep pending so 2 admins can override
+            logger.warning(f"User {user_id} flagged during external KYC: {external_result['reasons']}")
+        else:
+            user.is_flagged = False
+            user.kyc_status = KYCStatus.PENDING
+            
         await self.db.commit()
-        
-        # Notify admins for review
         await self._notify_admins_kyc_pending(user)
-        
-        logger.info(f"KYC submitted for user {user_id}")
         return user
     
     async def approve_kyc(self, user_id: int, admin_id: int) -> User:
-        """Approve KYC verification."""
+        """Approve KYC dynamically (1 for clean, 2 for flagged)."""
         user = await self._get_user(user_id)
         
         if user.kyc_status != KYCStatus.PENDING:
             raise ValidationError("KYC not pending approval")
+            
+        approvals = list(user.kyc_approvals or [])
+        if admin_id not in approvals:
+            approvals.append(admin_id)
+            user.kyc_approvals = approvals
+            
+        required_approvals = 2 if user.is_flagged else 1
         
-        user.kyc_status = KYCStatus.VERIFIED
-        
-        # Update user status if still pending
-        if user.status == UserStatus.PENDING and user.is_phone_verified:
-            user.status = UserStatus.ACTIVE
-        
+        if len(set(approvals)) >= required_approvals:
+            user.kyc_status = KYCStatus.VERIFIED
+            if user.status == UserStatus.PENDING and user.is_phone_verified:
+                user.status = UserStatus.ACTIVE
+            
+            await self.notification_service.send_kyc_approved(user.phone_number)
+            logger.info(f"KYC completely approved for user {user_id} by {len(set(approvals))} admins.")
+        else:
+            logger.info(f"KYC partially approved for user {user_id} by admin {admin_id}. Needs {required_approvals}")
+            
         await self.db.commit()
-        
-        # Send notification
-        await self.notification_service.send_kyc_approved(user.phone_number)
-        
-        logger.info(f"KYC approved for user {user_id} by admin {admin_id}")
         return user
     
     async def reject_kyc(self, user_id: int, admin_id: int, reason: str) -> User:
@@ -292,3 +310,45 @@ class AuthService:
         card_number = re.sub(r'[\s-]', '', card_number.upper())
         pattern = r'^GHA\d{9,10}$'
         return bool(re.match(pattern, card_number))
+
+    def _generate_account_number(self) -> str:
+        return "".join([str(random.randint(0,9)) for _ in range(10)])
+        
+    async def allocate_avok_account(self, user_id: int) -> User:
+        user = await self._get_user(user_id)
+        if not user:
+            raise NotFoundError("User", user_id)
+        if user.avok_account_number:
+            raise ValidationError("User already has an Avok account number")
+            
+        while True:
+            acct = self._generate_account_number()
+            existing = await self.db.execute(select(User).where(User.avok_account_number == acct))
+            if not existing.scalar_one_or_none():
+                user.avok_account_number = acct
+                break
+                
+        await self.db.commit()
+        return user
+
+    async def appoint_admin(self, phone_number: str) -> User:
+        user = await self._get_user_by_phone(phone_number)
+        if not user:
+            raise NotFoundError("User", phone_number)
+        if user.role == UserRole.SUPER_ADMIN:
+            raise ValidationError("Cannot downgrade a Super Admin to standard Admin")
+            
+        user.role = UserRole.ADMIN
+        await self.db.commit()
+        return user
+
+    async def dismiss_admin(self, phone_number: str) -> User:
+        user = await self._get_user_by_phone(phone_number)
+        if not user:
+            raise NotFoundError("User", phone_number)
+        if user.role == UserRole.SUPER_ADMIN:
+            raise ValidationError("Cannot dismiss a Super Admin")
+            
+        user.role = UserRole.BUYER
+        await self.db.commit()
+        return user

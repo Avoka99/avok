@@ -88,3 +88,14 @@ def require_payment_sandbox_enabled() -> None:
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Sandbox payment simulation is disabled",
         )
+
+async def get_current_super_admin(
+    current_user: User = Depends(get_current_user)
+) -> User:
+    """Get current super admin user."""
+    if current_user.role != UserRole.SUPER_ADMIN:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Super Admin privileges strictly required",
+        )
+    return current_user

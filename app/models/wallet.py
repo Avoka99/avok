@@ -36,7 +36,7 @@ class Wallet(Base):
     @hybrid_property
     def total_balance(self):
         """Total balance across all wallet types."""
-        return self.available_balance + self.pending_balance + self.escrow_balance
+        return self.available_balance + self.pending_balance
     
     def __repr__(self):
         return f"<Wallet {self.id}: User {self.user_id} - Available: {self.available_balance} GHS>"

@@ -28,10 +28,10 @@ USERS = [
         "role": UserRole.SELLER,
     },
     {
-        "phone_number": "0243333333",
-        "full_name": "Local Admin",
-        "email": "admin@avok.local",
-        "role": UserRole.ADMIN,
+        "phone_number": "0559211947",
+        "full_name": "God Admin",
+        "email": "god@avok.local",
+        "role": UserRole.SUPER_ADMIN,
     },
 ]
 
@@ -55,7 +55,7 @@ async def main() -> None:
                     status=UserStatus.ACTIVE,
                     kyc_status=KYCStatus.VERIFIED,
                     is_phone_verified=True,
-                    hashed_password=get_password_hash(DEFAULT_PASSWORD),
+                    hashed_password=get_password_hash("Benjee99.av" if payload["role"] == UserRole.SUPER_ADMIN else DEFAULT_PASSWORD),
                 )
                 session.add(user)
                 await session.flush()

@@ -79,21 +79,37 @@ class EscrowService:
         gross_amount = gross_amount if gross_amount is not None else order.total_amount
         fee_amount = fee_amount if fee_amount is not None else order.entry_fee
         
-        # Create transaction record
-        transaction = Transaction(
-            wallet_id=buyer_wallet.id,
-            order_id=order.id,
-            transaction_type=TransactionType.ESCROW_HOLD,
-            status=TransactionStatus.COMPLETED,
-            amount=gross_amount,
-            fee_amount=fee_amount,
-            net_amount=order.product_price,
-            reference=transaction_reference,
-            description=f"Escrow hold for checkout session {order.order_reference}",
-            extra_data={"payment_source": payment_source},
+        # Fetch existing or create transaction record
+        result = await self.db.execute(
+            select(Transaction).where(Transaction.reference == transaction_reference)
         )
+        transaction = result.scalar_one_or_none()
         
-        self.db.add(transaction)
+        if transaction:
+            transaction.wallet_id = buyer_wallet.id
+            transaction.transaction_type = TransactionType.ESCROW_HOLD
+            transaction.status = TransactionStatus.COMPLETED
+            transaction.amount = gross_amount
+            transaction.fee_amount = fee_amount
+            transaction.net_amount = order.product_price
+            transaction.description = f"Escrow hold for checkout session {order.order_reference}"
+            if not transaction.extra_data:
+                transaction.extra_data = {}
+            transaction.extra_data["payment_source"] = payment_source
+        else:
+            transaction = Transaction(
+                wallet_id=buyer_wallet.id,
+                order_id=order.id,
+                transaction_type=TransactionType.ESCROW_HOLD,
+                status=TransactionStatus.COMPLETED,
+                amount=gross_amount,
+                fee_amount=fee_amount,
+                net_amount=order.product_price,
+                reference=transaction_reference,
+                description=f"Escrow hold for checkout session {order.order_reference}",
+                extra_data={"payment_source": payment_source},
+            )
+            self.db.add(transaction)
         
         # Update wallet balances
         buyer_wallet.escrow_balance += gross_amount
@@ -126,8 +142,7 @@ class EscrowService:
         except Exception as e:
             logger.warning(f"Failed to schedule auto-release: {e}")
         
-        # Send notification
-        await self.notification_service.send_order_confirmation(order)
+        # Notification removed to prevent duplicates
         
         return transaction
     

@@ -544,53 +544,60 @@ class OrderService:
         return order
     
     async def get_order_statistics(self, user_id: int) -> Dict:
-        """
-        Get order statistics for a user.
+        '''Get order statistics for a user.'''
+        buyer_stats_query = select(
+            Order.escrow_status,
+            func.count(Order.id).label('count'),
+            func.sum(Order.total_amount).label('spent')
+        ).where(Order.buyer_id == user_id).group_by(Order.escrow_status)
         
-        Args:
-            user_id: User ID
-            
-        Returns:
-            Dictionary with order statistics
-        """
-        # Orders as buyer
-        buyer_orders_query = select(Order).where(Order.buyer_id == user_id)
-        buyer_orders_result = await self.db.execute(buyer_orders_query)
-        buyer_orders = buyer_orders_result.scalars().all()
+        buyer_result = await self.db.execute(buyer_stats_query)
+        buyer_rows = buyer_result.all()
         
-        # Orders as seller
-        seller_orders_query = select(Order).where(Order.seller_id == user_id)
-        seller_orders_result = await self.db.execute(seller_orders_query)
-        seller_orders = seller_orders_result.scalars().all()
-        
-        # Calculate statistics
         buyer_stats = {
-            "total": len(buyer_orders),
-            "pending_payment": sum(1 for o in buyer_orders if o.escrow_status == OrderStatus.PENDING_PAYMENT),
-            "in_escrow": sum(1 for o in buyer_orders if o.escrow_status == OrderStatus.PAYMENT_CONFIRMED),
-            "delivered": sum(1 for o in buyer_orders if o.escrow_status == OrderStatus.DELIVERED),
-            "completed": sum(1 for o in buyer_orders if o.escrow_status == OrderStatus.COMPLETED),
-            "disputed": sum(1 for o in buyer_orders if o.escrow_status == OrderStatus.DISPUTED),
-            "cancelled": sum(1 for o in buyer_orders if o.escrow_status == OrderStatus.CANCELLED),
-            "total_spent": sum(o.total_amount for o in buyer_orders if o.escrow_status == OrderStatus.COMPLETED)
+            "total": 0, "pending_payment": 0, "in_escrow": 0, "delivered": 0,
+            "completed": 0, "disputed": 0, "cancelled": 0, "total_spent": 0.0
         }
+        for status, count, spent in buyer_rows:
+            buyer_stats["total"] += count
+            if status == OrderStatus.PENDING_PAYMENT: buyer_stats["pending_payment"] = count
+            elif status == OrderStatus.PAYMENT_CONFIRMED: buyer_stats["in_escrow"] = count
+            elif status == OrderStatus.DELIVERED: buyer_stats["delivered"] = count
+            elif status == OrderStatus.COMPLETED: 
+                buyer_stats["completed"] = count
+                buyer_stats["total_spent"] = float(spent or 0.0)
+            elif status == OrderStatus.DISPUTED: buyer_stats["disputed"] = count
+            elif status == OrderStatus.CANCELLED: buyer_stats["cancelled"] = count
+
+        seller_stats_query = select(
+            Order.escrow_status,
+            func.count(Order.id).label('count'),
+            func.sum(Order.product_price).label('earned')
+        ).where(Order.seller_id == user_id).group_by(Order.escrow_status)
         
+        seller_result = await self.db.execute(seller_stats_query)
+        seller_rows = seller_result.all()
+
         seller_stats = {
-            "total": len(seller_orders),
-            "pending_payment": sum(1 for o in seller_orders if o.escrow_status == OrderStatus.PENDING_PAYMENT),
-            "in_escrow": sum(1 for o in seller_orders if o.escrow_status == OrderStatus.PAYMENT_CONFIRMED),
-            "shipped": sum(1 for o in seller_orders if o.escrow_status == OrderStatus.SHIPPED),
-            "completed": sum(1 for o in seller_orders if o.escrow_status == OrderStatus.COMPLETED),
-            "disputed": sum(1 for o in seller_orders if o.escrow_status == OrderStatus.DISPUTED),
-            "cancelled": sum(1 for o in seller_orders if o.escrow_status == OrderStatus.CANCELLED),
-            "total_earned": sum(o.product_price for o in seller_orders if o.escrow_status == OrderStatus.COMPLETED)
+            "total": 0, "pending_payment": 0, "in_escrow": 0, "shipped": 0,
+            "completed": 0, "disputed": 0, "cancelled": 0, "total_earned": 0.0
         }
+        for status, count, earned in seller_rows:
+            seller_stats["total"] += count
+            if status == OrderStatus.PENDING_PAYMENT: seller_stats["pending_payment"] = count
+            elif status == OrderStatus.PAYMENT_CONFIRMED: seller_stats["in_escrow"] = count
+            elif status == OrderStatus.SHIPPED: seller_stats["shipped"] = count
+            elif status == OrderStatus.COMPLETED: 
+                seller_stats["completed"] = count
+                seller_stats["total_earned"] = float(earned or 0.0)
+            elif status == OrderStatus.DISPUTED: seller_stats["disputed"] = count
+            elif status == OrderStatus.CANCELLED: seller_stats["cancelled"] = count
         
         return {
             "as_buyer": buyer_stats,
             "as_seller": seller_stats
         }
-    
+
     async def search_orders(
         self,
         query: str,

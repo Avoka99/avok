@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Optional, List
 from sqlalchemy import (
-    Column, String, Boolean, DateTime, Enum, Integer, Text, ForeignKey, Index
+    Column, String, Boolean, DateTime, Enum, Integer, Text, ForeignKey, Index, JSON
 )
 from sqlalchemy.orm import relationship
 import enum
@@ -21,6 +21,7 @@ class UserStatus(str, enum.Enum):
     ACTIVE = "active"
     SUSPENDED = "suspended"
     BANNED = "banned"
+    DEACTIVATED = "deactivated"
 
 
 class KYCStatus(str, enum.Enum):
@@ -44,9 +45,11 @@ class User(Base):
     
     # KYC Information
     kyc_status = Column(Enum(KYCStatus), default=KYCStatus.NOT_SUBMITTED)
-    ghana_card_number = Column(String(50), unique=True, nullable=True)
-    ghana_card_image_url = Column(String(500), nullable=True)
+    national_id_type = Column(String(50), nullable=True)
+    national_id_number = Column(String(50), index=True, nullable=True)
+    national_id_image_url = Column(String(500), nullable=True)
     selfie_image_url = Column(String(500), nullable=True)
+    kyc_approvals = Column(JSON, default=list, nullable=True)
     
     # Verification
     is_phone_verified = Column(Boolean, default=False)
@@ -61,6 +64,9 @@ class User(Base):
     dispute_count = Column(Integer, default=0)
     fraud_score = Column(Integer, default=0)
     is_flagged = Column(Boolean, default=False)
+    
+    # Avok Account System
+    avok_account_number = Column(String(20), unique=True, nullable=True)
     
     # Timestamps
     created_at = Column(DateTime, default=datetime.utcnow, nullable=False)

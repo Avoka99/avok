@@ -5,10 +5,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useAuthStore } from "@/stores/auth-store";
 
-const roles = [
-  { value: "buyer", label: "Payer" },
-  { value: "seller", label: "Recipient" }
-];
+
 
 export default function RegisterPage() {
   const router = useRouter();
@@ -18,7 +15,7 @@ export default function RegisterPage() {
     phone_number: "",
     email: "",
     password: "",
-    role: "buyer"
+    wants_avok_account: true
   });
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
@@ -88,19 +85,31 @@ export default function RegisterPage() {
               placeholder="Create a password"
             />
           </div>
-          <div>
-            <label className="mb-2 block text-sm font-semibold text-stone-700">Account type</label>
-            <select
-              className="field"
-              value={form.role}
-              onChange={(event) => setForm((prev) => ({ ...prev, role: event.target.value }))}
-            >
-              {roles.map((role) => (
-                <option key={role.value} value={role.value}>
-                  {role.label}
-                </option>
-              ))}
-            </select>
+          <div className="sm:col-span-2 card rounded-[24px] bg-stone-50 p-5 border border-stone-200">
+            <label className="mb-2 block text-sm font-semibold text-stone-700">Would you like an Avok account number to hold money for transactions?</label>
+            <p className="text-sm text-stone-500 mb-4">You can get one now or opt-in later from your dashboard.</p>
+            <div className="flex gap-4">
+              <label className="flex items-center gap-2 cursor-pointer">
+                <input 
+                  type="radio" 
+                  name="wants_avok_account"
+                  checked={form.wants_avok_account === true}
+                  onChange={() => setForm(prev => ({ ...prev, wants_avok_account: true }))}
+                  className="w-5 h-5 text-emerald-600 focus:ring-emerald-500"
+                />
+                <span className="font-medium text-stone-800">Yes, allocate an account</span>
+              </label>
+              <label className="flex items-center gap-2 cursor-pointer">
+                <input 
+                  type="radio" 
+                  name="wants_avok_account"
+                  checked={form.wants_avok_account === false}
+                  onChange={() => setForm(prev => ({ ...prev, wants_avok_account: false }))}
+                  className="w-5 h-5 text-stone-600 focus:ring-stone-500"
+                />
+                <span className="font-medium text-stone-800">No, maybe later</span>
+              </label>
+            </div>
           </div>
 
           <div className="card rounded-[24px] bg-stone-50 p-5 sm:col-span-2">

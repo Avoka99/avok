@@ -15,6 +15,7 @@ class UserBase(BaseModel):
 
 class UserCreate(UserBase):
     password: str = Field(..., min_length=8)
+    wants_avok_account: bool = False
     
     @field_validator("password")
     @classmethod
@@ -34,13 +35,14 @@ class UserLogin(BaseModel):
 class UserUpdate(BaseModel):
     full_name: Optional[str] = None
     email: Optional[EmailStr] = None
-    ghana_card_number: Optional[str] = None
+    national_id_number: Optional[str] = None
 
 
 class UserResponse(UserBase):
     model_config = ConfigDict(from_attributes=True)
 
     id: int
+    avok_account_number: Optional[str] = None
     status: UserStatus
     kyc_status: KYCStatus
     is_phone_verified: bool
@@ -68,6 +70,9 @@ class PhoneVerificationSend(BaseModel):
 
 
 class KYCSubmission(BaseModel):
-    ghana_card_number: str
-    ghana_card_image: str  # Base64 or S3 URL
+    document_type: str
+    document_number: str
+    document_image: str  # Base64 or S3 URL
     selfie_image: str  # Base64 or S3 URL
+class AdminRoleRequest(BaseModel):
+    phone_number: str

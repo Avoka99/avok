@@ -4,9 +4,16 @@ import { useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import AdminReviewPanel from "@/components/AdminReviewPanel";
 import { api } from "@/lib/api";
+import { useAuthStore } from "@/stores/auth-store";
 
 export default function AdminDashboardPage() {
+  const user = useAuthStore(state => state.user);
   const queryClient = useQueryClient();
+
+  if (!user || (user.role !== 'admin' && user.role !== 'super_admin' && !user.is_superuser)) {
+      return <div className="p-10 text-center text-rose-600 font-bold">Unauthorized: This area requires elevated privileges.</div>;
+  }
+
   const [selectedDisputeId, setSelectedDisputeId] = useState(null);
 
   const disputesQuery = useQuery({

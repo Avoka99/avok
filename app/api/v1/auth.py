@@ -2,10 +2,10 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 from datetime import datetime
 
-from app.api.dependencies import get_db, get_current_user
+from app.api.dependencies import get_db, get_current_user, get_current_super_admin
 from app.schemas.user import (
     UserCreate, UserLogin, UserResponse, Token, 
-    PhoneVerificationSend, PhoneVerificationRequest, KYCSubmission
+    PhoneVerificationSend, PhoneVerificationRequest, KYCSubmission, AdminRoleRequest
 )
 from app.services.auth import AuthService
 from app.core.security import create_access_token, create_refresh_token
@@ -81,8 +81,44 @@ async def submit_kyc(
     auth_service = AuthService(db)
     user = await auth_service.submit_kyc(
         user_id=current_user.id,
-        ghana_card_number=payload.ghana_card_number,
-        ghana_card_image_url=payload.ghana_card_image,
+        document_type=payload.document_type,
+        document_number=payload.document_number,
+        document_image_url=payload.document_image,
         selfie_image_url=payload.selfie_image,
     )
+    return user
+
+@router.post("/allocate-account", response_model=UserResponse)
+async def allocate_account(
+    current_user=Depends(get_current_user),
+    db: AsyncSession = Depends(get_db)
+):
+    """Allocate an Avok account number to user."""
+    auth_service = AuthService(db)
+    try:
+        user = await auth_service.allocate_avok_account(current_user.id)
+        return user
+    except ValidationError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=e.message)
+
+@router.post("/roles/appoint-admin", response_model=UserResponse)
+async def appoint_admin(
+    payload: AdminRoleRequest,
+    current_super_admin=Depends(get_current_super_admin),
+    db: AsyncSession = Depends(get_db)
+):
+    """Appoint a new Admin. Only Super Admins can do this."""
+    auth_service = AuthService(db)
+    user = await auth_service.appoint_admin(payload.phone_number)
+    return user
+
+@router.post("/roles/dismiss-admin", response_model=UserResponse)
+async def dismiss_admin(
+    payload: AdminRoleRequest,
+    current_super_admin=Depends(get_current_super_admin),
+    db: AsyncSession = Depends(get_db)
+):
+    """Dismiss an Admin. Only Super Admins can do this."""
+    auth_service = AuthService(db)
+    user = await auth_service.dismiss_admin(payload.phone_number)
     return user

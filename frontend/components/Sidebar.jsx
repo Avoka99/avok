@@ -2,19 +2,32 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { Bell, LayoutDashboard, ShieldAlert, ShoppingBag, Wallet, BadgeCheck } from "lucide-react";
+import { Bell, LayoutDashboard, ShieldAlert, ShoppingBag, Wallet, BadgeCheck, Shield } from "lucide-react";
+import { useAuthStore } from "@/stores/auth-store";
 
-const items = [
+const baseItems = [
   { href: "/buyer", label: "Payer", icon: ShoppingBag },
   { href: "/seller", label: "Recipient", icon: LayoutDashboard },
-  { href: "/admin", label: "Admin", icon: ShieldAlert },
-  { href: "/account", label: "Verified Account", icon: BadgeCheck },
+  { href: "/account", label: "Verify Account", icon: BadgeCheck },
   { href: "/wallet", label: "Wallet", icon: Wallet },
   { href: "/notifications", label: "Alerts", icon: Bell }
 ];
 
+const adminItem = { href: "/admin", label: "Admin Portal", icon: ShieldAlert };
+const superAdminItem = { href: "/super-admin", label: "Super Admin", icon: Shield };
+
 export default function Sidebar() {
   const pathname = usePathname();
+  const user = useAuthStore(state => state.user);
+  
+  const items = [...baseItems];
+  if (user?.role === 'admin' || user?.role === 'super_admin' || user?.is_superuser) {
+      items.splice(2, 0, adminItem); 
+  }
+  if (user?.role === 'super_admin' || user?.is_superuser) {
+      items.push(superAdminItem);
+  }
+
 
   return (
     <aside className="card hidden w-72 shrink-0 rounded-[28px] p-4 lg:block">

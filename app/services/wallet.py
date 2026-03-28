@@ -34,7 +34,7 @@ class WalletService:
             "available_balance": wallet.available_balance,
             "pending_balance": wallet.pending_balance,
             "escrow_balance": wallet.escrow_balance,
-            "total_balance": wallet.available_balance + wallet.pending_balance + wallet.escrow_balance,
+            "total_balance": wallet.available_balance + wallet.pending_balance,
             "is_verified_account": is_verified_account(user),
         }
 
