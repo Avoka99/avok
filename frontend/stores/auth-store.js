@@ -20,7 +20,11 @@ function normalizeUserRole(user) {
   }
 
   if (user.role) {
-    return user.role === "buyer" || user.role === "seller" ? "user" : user.role;
+    const role = user.role.toLowerCase();
+    if (role === "buyer" || role === "seller") {
+      return "user";
+    }
+    return role;
   }
 
   if (user.is_superuser) {

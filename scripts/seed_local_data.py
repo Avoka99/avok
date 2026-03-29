@@ -18,19 +18,19 @@ USERS = [
     {
         "phone_number": "0241111111",
         "full_name": "Local Buyer",
-        "email": "buyer@avok.local",
+        "email": "buyer@avok.com",
         "role": UserRole.USER,
     },
     {
         "phone_number": "0242222222",
         "full_name": "Local Seller",
-        "email": "seller@avok.local",
+        "email": "seller@avok.com",
         "role": UserRole.USER,
     },
     {
         "phone_number": "0559211947",
         "full_name": "God Admin",
-        "email": "god@avok.local",
+        "email": "god@avok.com",
         "role": UserRole.SUPER_ADMIN,
     },
 ]

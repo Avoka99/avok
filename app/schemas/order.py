@@ -48,7 +48,7 @@ class OrderCreate(BaseModel):
     product_description: Optional[str] = None
     product_price: Optional[float] = Field(default=None, gt=0)
     items: List[OrderItemCreate] = Field(default_factory=list)
-    delivery_method: DeliveryMethod
+    delivery_method: DeliveryMethod = DeliveryMethod.DELIVERY
     shipping_address: Optional[str] = None
     product_url: Optional[str] = None
     auto_import_product_details: bool = True
