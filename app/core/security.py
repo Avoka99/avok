@@ -52,6 +52,34 @@ def create_refresh_token(data: dict) -> str:
     return encoded_jwt
 
 
+def create_guest_access_token(guest_session_id: int, order_reference: str, expires_delta: Optional[timedelta] = None) -> str:
+    """Create a short-lived access token for a guest checkout session."""
+    return create_access_token(
+        {
+            "sub": f"guest:{guest_session_id}",
+            "role": "user",
+            "subject_type": "guest_checkout",
+            "guest_session_id": guest_session_id,
+            "order_reference": order_reference,
+        },
+        expires_delta=expires_delta,
+    )
+
+
+def create_guest_refresh_token(guest_session_id: int, order_reference: str, expires_delta: Optional[timedelta] = None) -> str:
+    """Create a refresh token for a guest checkout session."""
+    to_encode = {
+        "sub": f"guest:{guest_session_id}",
+        "role": "user",
+        "subject_type": "guest_checkout",
+        "guest_session_id": guest_session_id,
+        "order_reference": order_reference,
+    }
+    expire = datetime.utcnow() + (expires_delta or timedelta(hours=24))
+    to_encode.update({"exp": expire, "type": "refresh"})
+    return jwt.encode(to_encode, settings.jwt_secret_key, algorithm=settings.jwt_algorithm)
+
+
 def decode_token(token: str) -> Optional[dict]:
     """Decode and validate JWT token."""
     try:

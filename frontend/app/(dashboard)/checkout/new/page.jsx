@@ -7,6 +7,7 @@ import { useRouter } from "next/navigation";
 import { useSearchParams } from "next/navigation";
 import { api } from "@/lib/api";
 import { calculateCappedFee } from "@/lib/fees";
+import { translateApiError, getErrorAction } from "@/lib/errors";
 import { usePaymentFlowStore } from "@/stores/payment-flow-store";
 import { useAuthStore } from "@/stores/auth-store";
 
@@ -14,6 +15,28 @@ const deliveryMethods = [
   { value: "pickup", label: "Pickup" },
   { value: "delivery", label: "Delivery" }
 ];
+
+const createEmptyItem = () => ({
+  item_name: "",
+  item_description: "",
+  quantity: 1,
+  unit_price: "",
+  product_url: ""
+});
+
+const normalizeSeededItems = (items) => {
+  if (!Array.isArray(items) || items.length === 0) {
+    return [createEmptyItem()];
+  }
+
+  return items.map((item) => ({
+    item_name: item.item_name || "",
+    item_description: item.item_description || "",
+    quantity: Number(item.quantity || 1),
+    unit_price: item.unit_price ?? "",
+    product_url: item.product_url || ""
+  }));
+};
 
 export default function CreateCheckoutPage() {
   const router = useRouter();
@@ -38,6 +61,7 @@ export default function CreateCheckoutPage() {
     product_name: "",
     product_description: "",
     product_price: "",
+    items: [createEmptyItem()],
     delivery_method: "pickup",
     shipping_address: "",
     product_url: "",
@@ -48,38 +72,74 @@ export default function CreateCheckoutPage() {
   });
 
   const isEmbeddedCheckout = searchParams.get("embedded") === "1";
+  const merchantIntentReference = searchParams.get("intent") || draftOrder.merchant_intent_reference || "";
+  const isLocked = Boolean(isEmbeddedCheckout && draftOrder.isMerchantVerified);
 
   useEffect(() => {
-    const seeded = {
-      seller_id: searchParams.get("seller_id") || draftOrder.seller_id || "",
-      seller_display_name: searchParams.get("seller_display_name") || draftOrder.seller_display_name || "",
-      seller_contact: searchParams.get("seller_contact") || draftOrder.seller_contact || "",
-      payout_destination: searchParams.get("payout_destination") || draftOrder.payout_destination || "avok_account",
-      payout_reference: searchParams.get("payout_reference") || draftOrder.payout_reference || "",
-      payout_account_name: searchParams.get("payout_account_name") || draftOrder.payout_account_name || "",
-      payout_bank_name: searchParams.get("payout_bank_name") || draftOrder.payout_bank_name || "",
-      product_name: searchParams.get("product_name") || draftOrder.product_name || "",
-      product_description: searchParams.get("product_description") || draftOrder.product_description || "",
-      product_price: searchParams.get("product_price") || draftOrder.product_price || "",
-      delivery_method: searchParams.get("delivery_method") || draftOrder.delivery_method || "pickup",
-      shipping_address: searchParams.get("shipping_address") || draftOrder.shipping_address || "",
-      product_url: searchParams.get("product_url") || draftOrder.product_url || "",
-      payment_source: searchParams.get("payment_source") || draftOrder.payment_source || "verified_account",
-      merchant_name: searchParams.get("merchant_name") || draftOrder.merchant_name || "",
-      return_url: searchParams.get("return_url") || draftOrder.return_url || "",
-      cancel_url: searchParams.get("cancel_url") || draftOrder.cancel_url || ""
-    };
-    setForm(seeded);
-  }, [draftOrder, searchParams]);
+    const seededItems = normalizeSeededItems(
+      draftOrder.items?.length
+        ? draftOrder.items
+        : draftOrder.product_name || draftOrder.product_price
+          ? [{
+              item_name: draftOrder.product_name || "",
+              item_description: draftOrder.product_description || "",
+              quantity: 1,
+              unit_price: draftOrder.product_price || "",
+              product_url: draftOrder.product_url || ""
+            }]
+          : [createEmptyItem()]
+    );
+
+    setForm({
+      seller_id: draftOrder.seller_id || "",
+      seller_display_name: draftOrder.seller_display_name || "",
+      seller_contact: draftOrder.seller_contact || "",
+      payout_destination: draftOrder.payout_destination || "avok_account",
+      payout_reference: draftOrder.payout_reference || "",
+      payout_account_name: draftOrder.payout_account_name || "",
+      payout_bank_name: draftOrder.payout_bank_name || "",
+      merchant_intent_reference: merchantIntentReference,
+      product_name: draftOrder.product_name || seededItems[0]?.item_name || "",
+      product_description: draftOrder.product_description || seededItems[0]?.item_description || "",
+      product_price: draftOrder.product_price || "",
+      items: seededItems,
+      delivery_method: draftOrder.delivery_method || "pickup",
+      shipping_address: draftOrder.shipping_address || "",
+      product_url: draftOrder.product_url || "",
+      payment_source: draftOrder.payment_source || "verified_account",
+      merchant_name: draftOrder.merchant_name || "",
+      return_url: draftOrder.return_url || "",
+      cancel_url: draftOrder.cancel_url || ""
+    });
+  }, [draftOrder, merchantIntentReference]);
 
   const createOrderMutation = useMutation({
     mutationFn: async (payload) => {
+      const normalizedItems = payload.items
+        .filter((item) => item.item_name && Number(item.unit_price) > 0)
+        .map((item) => ({
+          item_name: item.item_name,
+          item_description: item.item_description || undefined,
+          quantity: Number(item.quantity || 1),
+          unit_price: Number(item.unit_price),
+          product_url: item.product_url || undefined
+        }));
+
+      const computedSubtotal = normalizedItems.length
+        ? normalizedItems.reduce((sum, item) => sum + item.quantity * item.unit_price, 0)
+        : Number(payload.product_price);
+
       const requestPayload = {
         ...payload,
         recipient_id: payload.seller_id ? Number(payload.seller_id) : null,
         recipient_display_name: payload.seller_display_name,
         recipient_contact: payload.seller_contact,
-        product_price: Number(payload.product_price),
+        merchant_intent_reference: payload.merchant_intent_reference || undefined,
+        product_name: normalizedItems[0]?.item_name || payload.product_name,
+        product_description: normalizedItems[0]?.item_description || payload.product_description,
+        product_price: computedSubtotal,
+        product_url: payload.product_url || normalizedItems[0]?.product_url || "",
+        items: normalizedItems,
         auto_import_product_details: Boolean(payload.product_url)
       };
       delete requestPayload.seller_id;
@@ -101,12 +161,16 @@ export default function CreateCheckoutPage() {
       if (data?.access_token) {
         setSession({
           accessToken: data.access_token,
+          refreshToken: data.refresh_token,
           user: {
-            id: data.guest_user_id,
+            id: null,
+            guest_session_id: data.guest_session_id,
             phone_number: guest.guest_phone_number,
             full_name: guest.guest_full_name,
             email: guest.guest_email || null,
-            role: "buyer"
+            role: "user",
+            is_guest: true,
+            expires_at: data.expires_at
           }
         });
       }
@@ -115,15 +179,55 @@ export default function CreateCheckoutPage() {
     }
   });
 
-  const productPrice = Number(form.product_price || 0);
+  const updateItem = (index, key, value) => {
+    setForm((prev) => ({
+      ...prev,
+      items: prev.items.map((item, itemIndex) =>
+        itemIndex === index ? { ...item, [key]: value } : item
+      )
+    }));
+  };
+
+  const addItem = () => {
+    setForm((prev) => ({
+      ...prev,
+      items: [...prev.items, createEmptyItem()]
+    }));
+  };
+
+  const removeItem = (index) => {
+    setForm((prev) => ({
+      ...prev,
+      items: prev.items.length === 1
+        ? [createEmptyItem()]
+        : prev.items.filter((_, itemIndex) => itemIndex !== index)
+    }));
+  };
+
+  const populatedItems = form.items.filter((item) => item.item_name || Number(item.unit_price) > 0);
+  const productPrice = populatedItems.length
+    ? populatedItems.reduce((sum, item) => sum + Number(item.quantity || 0) * Number(item.unit_price || 0), 0)
+    : Number(form.product_price || 0);
   const depositFee = calculateCappedFee(productPrice);
+  const mediumRiskThreshold = 1000;
+  const highRiskThreshold = 3000;
+  const isVerifiedBalance = form.payment_source === "verified_account";
+  const securityTier = isVerifiedBalance
+    ? "verified-balance"
+    : productPrice > highRiskThreshold
+      ? "high"
+      : productPrice > mediumRiskThreshold
+        ? "medium"
+        : "low";
   const hasImportedSeed =
     isEmbeddedCheckout &&
     Boolean(
       form.product_url ||
+        form.merchant_intent_reference ||
         form.product_name ||
         form.product_description ||
         form.product_price ||
+        populatedItems.length ||
         form.seller_display_name ||
         form.payout_reference
     );
@@ -136,14 +240,20 @@ export default function CreateCheckoutPage() {
         </p>
         <h2 className="mt-3 text-3xl font-black">
           {isEmbeddedCheckout
-            ? "Review the imported product and payout details before Avok starts secure checkout."
+            ? "Review the imported cart and payout details before Avok starts secure checkout."
             : "Create a checkout session and see the escrow math before payment starts."}
         </h2>
         <p className="mt-3 max-w-3xl text-sm leading-7 text-stone-600">
           {isEmbeddedCheckout
-            ? "The external website should send the product link, amount, and payout details into Avok automatically. You can still add or correct information before continuing."
-            : "This screen is built for practical testing. Enter the payout recipient, product, and price, then the app shows what the payer funds now and what the recipient receives after escrow release."}
+            ? "The external website should create a signed checkout intent first, and Avok now loads that trusted payload from the server before showing it here."
+            : "This screen is built for practical testing. Enter the payout recipient, cart items, and price, then the app shows what the payer funds now and what the recipient receives after escrow release."}
         </p>
+        <div className="mt-5 rounded-[22px] bg-stone-50 p-4 text-sm leading-6 text-stone-700">
+          {securityTier === "low" && "Low-risk checkout: MoMo or bank payments usually stay fast and do not need full KYC."}
+          {securityTier === "medium" && "Medium-risk checkout: Avok may ask a registered payer to complete phone verification before funding."}
+          {securityTier === "high" && "Higher-risk checkout: Avok may require a registered, verified account before larger amounts can move."}
+          {securityTier === "verified-balance" && "Verified balance path: paying from stored Avok balance needs phone verification and approved KYC, but avoids the extra entry fee."}
+        </div>
       </section>
 
       {!accessToken ? (
@@ -152,6 +262,9 @@ export default function CreateCheckoutPage() {
           <h3 className="mt-3 text-2xl font-black">Continue without creating a full Avok account first</h3>
           <p className="mt-2 max-w-3xl text-sm leading-7 text-stone-600">
             Avok will create a temporary payer session so you can fund escrow, track delivery, and open a dispute if needed. You can still create a full verified account later.
+          </p>
+          <p className="mt-2 max-w-3xl text-sm leading-7 text-stone-600">
+            Guest checkout works best for low-risk payments through MoMo or bank. Larger amounts may ask you to register so stronger checks do not block the transfer unexpectedly.
           </p>
           <div className="mt-5 grid gap-4 sm:grid-cols-3">
             <input
@@ -202,9 +315,15 @@ export default function CreateCheckoutPage() {
             <p className="text-sm font-semibold uppercase tracking-[0.18em] text-stone-500">Imported from merchant</p>
             <div className="mt-4 grid gap-4 sm:grid-cols-2">
               <div className="rounded-[22px] bg-stone-50 p-4 sm:col-span-2">
-                <p className="text-xs font-semibold uppercase tracking-[0.16em] text-stone-500">Product</p>
-                <p className="mt-2 text-lg font-bold text-stone-900">{form.product_name || "Product details will be imported from the link"}</p>
-                <p className="mt-2 text-sm leading-6 text-stone-600">{form.product_description || "Avok will try to fetch the product title, description, images, and videos automatically."}</p>
+                <p className="text-xs font-semibold uppercase tracking-[0.16em] text-stone-500">Cart items</p>
+                <p className="mt-2 text-lg font-bold text-stone-900">
+                  {populatedItems.length > 1
+                    ? `${populatedItems.length} items ready for one checkout`
+                    : form.product_name || populatedItems[0]?.item_name || "Product details will be imported from the link"}
+                </p>
+                <p className="mt-2 text-sm leading-6 text-stone-600">
+                  {form.product_description || populatedItems[0]?.item_description || "Avok will try to fetch the product title, description, images, and videos automatically."}
+                </p>
                 {form.product_url ? (
                   <a href={form.product_url} target="_blank" rel="noreferrer" className="mt-3 inline-flex text-sm font-semibold text-emerald-800">
                     Open source product link
@@ -214,6 +333,9 @@ export default function CreateCheckoutPage() {
               <div className="rounded-[22px] bg-stone-50 p-4">
                 <p className="text-xs font-semibold uppercase tracking-[0.16em] text-stone-500">Amount</p>
                 <p className="mt-2 text-lg font-bold text-stone-900">GHS {productPrice.toLocaleString()}</p>
+                <p className="mt-2 text-sm text-stone-600">
+                  {populatedItems.length} line item{populatedItems.length === 1 ? "" : "s"}
+                </p>
               </div>
               <div className="rounded-[22px] bg-stone-50 p-4">
                 <p className="text-xs font-semibold uppercase tracking-[0.16em] text-stone-500">Payout recipient</p>
@@ -236,13 +358,13 @@ export default function CreateCheckoutPage() {
               <div className="rounded-[22px] bg-white/10 p-4">
                 <p className="text-sm text-stone-300">What Avok imported</p>
                 <p className="mt-1 text-sm leading-6 text-stone-100">
-                  Product details should come from the external website or product link first, so the payer is not starting from a blank form.
+                  Product details now come from a merchant-signed checkout intent stored on the Avok backend, so the payer is not relying on raw browser query strings.
                 </p>
               </div>
               <div className="rounded-[22px] bg-white/10 p-4">
                 <p className="text-sm text-stone-300">What the user can still do</p>
                 <p className="mt-1 text-sm leading-6 text-stone-100">
-                  Review the imported data, add missing delivery notes, and correct payout or product details if something looks wrong.
+                  Review the imported data and add payer-side details like guest identity or delivery notes. Merchant-owned product and payout data should be treated as trusted checkout intent data.
                 </p>
               </div>
               <div className="rounded-[22px] bg-emerald-900/70 p-4 text-sm leading-6 text-emerald-50">
@@ -267,15 +389,15 @@ export default function CreateCheckoutPage() {
               <>
                 <div>
                   <label className="mb-2 block text-sm font-semibold text-stone-700">Recipient user ID</label>
-                  <input className="field" value={form.seller_id} onChange={(event) => setForm((prev) => ({ ...prev, seller_id: event.target.value }))} placeholder="2" />
+                  <input className="field" value={form.seller_id} onChange={(event) => setForm((prev) => ({ ...prev, seller_id: event.target.value }))} placeholder="2" readOnly={isLocked} />
                 </div>
                 <div>
                   <label className="mb-2 block text-sm font-semibold text-stone-700">Payout recipient name</label>
-                  <input className="field" value={form.seller_display_name} onChange={(event) => setForm((prev) => ({ ...prev, seller_display_name: event.target.value }))} placeholder="Shanghai Machine Store" />
+                  <input className="field" value={form.seller_display_name} onChange={(event) => setForm((prev) => ({ ...prev, seller_display_name: event.target.value }))} placeholder="Shanghai Machine Store" readOnly={isLocked} />
                 </div>
                 <div>
                   <label className="mb-2 block text-sm font-semibold text-stone-700">Recipient contact</label>
-                  <input className="field" value={form.seller_contact} onChange={(event) => setForm((prev) => ({ ...prev, seller_contact: event.target.value }))} placeholder="Phone or email" />
+                  <input className="field" value={form.seller_contact} onChange={(event) => setForm((prev) => ({ ...prev, seller_contact: event.target.value }))} placeholder="Phone or email" readOnly={isLocked} />
                 </div>
               </>
             ) : null}
@@ -299,22 +421,94 @@ export default function CreateCheckoutPage() {
               <label className="mb-2 block text-sm font-semibold text-stone-700">Bank name</label>
               <input className="field" value={form.payout_bank_name} onChange={(event) => setForm((prev) => ({ ...prev, payout_bank_name: event.target.value }))} placeholder="Optional for bank payout" />
             </div>
-            <div>
-              <label className="mb-2 block text-sm font-semibold text-stone-700">Product price (GHS)</label>
-              <input className="field" value={form.product_price} onChange={(event) => setForm((prev) => ({ ...prev, product_price: event.target.value }))} placeholder="4200" />
-            </div>
             <div className="sm:col-span-2">
               <label className="mb-2 block text-sm font-semibold text-stone-700">Product link</label>
               <input className="field" value={form.product_url} onChange={(event) => setForm((prev) => ({ ...prev, product_url: event.target.value }))} placeholder="https://example.com/product" />
             </div>
             <div className="sm:col-span-2">
-              <label className="mb-2 block text-sm font-semibold text-stone-700">Product name</label>
-              <input className="field" value={form.product_name} onChange={(event) => setForm((prev) => ({ ...prev, product_name: event.target.value }))} placeholder="Imported or corrected product name" />
-              <p className="mt-2 text-xs text-stone-500">If you paste a product link, Avok can try to import the title, description, images, and videos automatically.</p>
-            </div>
-            <div className="sm:col-span-2">
-              <label className="mb-2 block text-sm font-semibold text-stone-700">Product description</label>
-              <textarea rows={4} className="field" value={form.product_description} onChange={(event) => setForm((prev) => ({ ...prev, product_description: event.target.value }))} placeholder="Add anything the imported listing missed, such as condition or delivery notes." />
+              <div className="flex items-center justify-between">
+                <label className="mb-2 block text-sm font-semibold text-stone-700">Cart items</label>
+                {!isLocked && (
+                  <button type="button" className="text-sm font-semibold text-emerald-800" onClick={addItem}>
+                    Add another item
+                  </button>
+                )}
+              </div>
+              <div className="space-y-4">
+                {form.items.map((item, index) => (
+                  <div key={`item-${index}`} className="rounded-[22px] border border-stone-200 p-4">
+                    <div className="grid gap-4 sm:grid-cols-2">
+                      <div className="sm:col-span-2">
+                        <label className="mb-2 block text-sm font-semibold text-stone-700">Item name</label>
+                        <input
+                          className="field"
+                          value={item.item_name}
+                          onChange={(event) => updateItem(index, "item_name", event.target.value)}
+                          placeholder="Imported or corrected product name"
+                          readOnly={isLocked}
+                        />
+                      </div>
+                      <div>
+                        <label className="mb-2 block text-sm font-semibold text-stone-700">Quantity</label>
+                        <input
+                          className="field"
+                          type="number"
+                          min="1"
+                          value={item.quantity}
+                          onChange={(event) => updateItem(index, "quantity", event.target.value)}
+                          readOnly={isLocked}
+                        />
+                      </div>
+                      <div>
+                        <label className="mb-2 block text-sm font-semibold text-stone-700">Unit price (GHS)</label>
+                        <input
+                          className="field"
+                          value={item.unit_price}
+                          onChange={(event) => updateItem(index, "unit_price", event.target.value)}
+                          placeholder="4200"
+                          readOnly={isLocked}
+                        />
+                      </div>
+                      <div className="sm:col-span-2">
+                        <label className="mb-2 block text-sm font-semibold text-stone-700">Item description</label>
+                        <textarea
+                          rows={3}
+                          className="field"
+                          value={item.item_description}
+                          onChange={(event) => updateItem(index, "item_description", event.target.value)}
+                          placeholder="Add condition notes, delivery details, or size information."
+                        />
+                      </div>
+                      <div className="sm:col-span-2">
+                        <label className="mb-2 block text-sm font-semibold text-stone-700">Item link</label>
+                        <input
+                          className="field"
+                          value={item.product_url}
+                          onChange={(event) => updateItem(index, "product_url", event.target.value)}
+                          placeholder="https://example.com/product"
+                        />
+                      </div>
+                    </div>
+                    <div className="mt-3 flex items-center justify-between text-sm text-stone-600">
+                      <span>
+                        Line total: GHS {(Number(item.quantity || 0) * Number(item.unit_price || 0)).toLocaleString()}
+                      </span>
+                       {!isLocked && (
+                        <button
+                          type="button"
+                          className="font-semibold text-rose-700"
+                          onClick={() => removeItem(index)}
+                        >
+                          Remove item
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                ))}
+              </div>
+              <p className="mt-2 text-xs text-stone-500">
+                One checkout can now hold multiple products in the same escrow session. If you paste a product link, Avok can still try to import title, description, images, and videos automatically.
+              </p>
             </div>
             <div>
               <label className="mb-2 block text-sm font-semibold text-stone-700">Delivery method</label>
@@ -354,15 +548,33 @@ export default function CreateCheckoutPage() {
             </div>
           ) : null}
 
-          {createOrderMutation.isError ? <p className="mt-4 rounded-2xl bg-rose-50 px-4 py-3 text-sm font-medium text-rose-700">{createOrderMutation.error.message}</p> : null}
+          {createOrderMutation.isError ? (
+            <div className="mt-4 rounded-2xl bg-rose-50 px-4 py-3">
+              <p className="text-sm font-medium text-rose-700">{translateApiError(createOrderMutation.error.message)}</p>
+              {getErrorAction(createOrderMutation.error.message) && (
+                <Link
+                  href={getErrorAction(createOrderMutation.error.message).action}
+                  className="mt-2 inline-flex text-sm font-semibold text-rose-800 underline"
+                >
+                  {getErrorAction(createOrderMutation.error.message).label}
+                </Link>
+              )}
+            </div>
+          ) : null}
         </form>
 
         <section className="card rounded-[28px] bg-stone-900 p-6 text-white">
           <p className="text-sm uppercase tracking-[0.18em] text-stone-300">Escrow preview</p>
           <div className="mt-5 space-y-4">
+            {isLocked && (
+              <div className="rounded-[22px] bg-emerald-500/20 p-4 border border-emerald-500/30 flex items-center gap-3">
+                <div className="h-2 w-2 rounded-full bg-emerald-400 animate-pulse" />
+                <p className="text-xs font-bold uppercase tracking-wider text-emerald-300">Merchant Verified: {form.merchant_name}</p>
+              </div>
+            )}
             <div className="rounded-[22px] bg-white/10 p-4">
               <p className="text-sm text-stone-300">If payer funds from MoMo or bank</p>
-              <p className="mt-1 text-3xl font-black">GHS {depositFee.toFixed(2)}</p>
+              <p className="mt-1 text-3xl font-black">GHS {(productPrice + depositFee).toFixed(2)}</p>
               <p className="mt-2 text-sm text-stone-200">Entry fee is 1% capped at GHS 30 before money reaches the verified Avok account.</p>
             </div>
             <div className="rounded-[22px] bg-white/10 p-4">
@@ -372,6 +584,15 @@ export default function CreateCheckoutPage() {
             </div>
             <div className="rounded-[22px] bg-emerald-900/70 p-4 text-sm leading-6 text-emerald-50">
               Avok should autofill this checkout session when the user proceeds from the Pay with Avok flow, then hold the money in escrow until delivery or dispute resolution.
+            </div>
+            <div className="rounded-[22px] bg-white/10 p-4 text-sm leading-6 text-stone-100">
+              Cart subtotal: GHS {productPrice.toFixed(2)} across {populatedItems.length || 1} item{(populatedItems.length || 1) === 1 ? "" : "s"}.
+            </div>
+            <div className="rounded-[22px] bg-white/10 p-4 text-sm leading-6 text-stone-100">
+              {securityTier === "low" && "Current tier: low risk. This should be the least frustrating path and usually should not require more than standard checkout details."}
+              {securityTier === "medium" && "Current tier: medium risk. Phone verification is the usual next step for registered users if Avok needs stronger confirmation."}
+              {securityTier === "high" && "Current tier: high risk. Expect Avok to ask for a stronger identity trail before releasing larger payments into escrow."}
+              {securityTier === "verified-balance" && "Current tier: verified balance. This path is fastest after verification, but it is intentionally the strictest upfront."}
             </div>
           </div>
         </section>

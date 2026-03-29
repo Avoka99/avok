@@ -2,10 +2,11 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 from typing import List
 from sqlalchemy import func, select
+from sqlalchemy.types import String
 from sqlalchemy.orm import selectinload
 
 from app.api.dependencies import get_db, get_current_admin
-from app.schemas.admin import AdminActionQueueItem, AdminDisputeQueueItem
+from app.schemas.admin import AdminActionQueueItem, AdminDisputeQueueItem, AdminUserResponse
 from app.models.admin_action import AdminAction
 from app.models.dispute import Dispute
 from app.models.user import User, UserStatus
@@ -23,7 +24,7 @@ async def list_users(
     """List all users (admin only)."""
     result = await db.execute(select(User).offset(skip).limit(limit))
     users = result.scalars().all()
-    return {"users": users, "count": len(users)}
+    return {"users": [AdminUserResponse.model_validate(u) for u in users], "count": len(users)}
 
 
 @router.get("/users/{user_id}")
@@ -37,7 +38,7 @@ async def get_user(
     user = result.scalar_one_or_none()
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
-    return user
+    return AdminUserResponse.model_validate(user)
 
 
 @router.get("/dashboard")
@@ -56,9 +57,22 @@ async def admin_dashboard(
     order_count_result = await db.execute(select(func.count()).select_from(Order))
     total_orders = order_count_result.scalar()
     
+    from sqlalchemy import or_
+    
+    flagged_orders_result = await db.execute(
+        select(Order).where(
+            or_(
+                Order.payout_metadata.cast(String).like('%fraud_review%'),
+                Order.payout_metadata.cast(String).like('%payment_review%')
+            )
+        )
+    )
+    flagged_orders = flagged_orders_result.scalars().all()
+    
     return {
         "total_users": total_users,
         "total_orders": total_orders,
+        "flagged_orders_count": len(flagged_orders),
         "admin": current_user.email
     }
 

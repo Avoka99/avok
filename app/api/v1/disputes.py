@@ -47,10 +47,6 @@ async def create_dispute(
     """Create a new dispute for a checkout session (payer only)."""
     dispute_service = DisputeService(db)
     
-    # Only payers can create disputes
-    if current_user.role != UserRole.BUYER:
-        raise HTTPException(status_code=403, detail="Only payers can create disputes")
-    
     dispute = await dispute_service.create_dispute(
         order_reference=dispute_data.session_reference,
         buyer_id=current_user.id,

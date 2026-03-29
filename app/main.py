@@ -11,6 +11,8 @@ from app.core.exceptions import AvokException
 from app.api.v1.router import api_router
 from app.api.middleware.audit_log import AuditLogMiddleware
 from app.api.middleware.rate_limit import RateLimitMiddleware
+from app.api.middleware.auth import AuthStateMiddleware
+import app.models  # noqa: F401
 
 logger = logging.getLogger(__name__)
 
@@ -31,10 +33,11 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Custom middleware
+# Custom middleware - Order of execution (Request): Auth -> RateLimit -> AuditLog
+app.add_middleware(AuditLogMiddleware)
 if settings.rate_limit_enabled:
     app.add_middleware(RateLimitMiddleware)
-app.add_middleware(AuditLogMiddleware)
+app.add_middleware(AuthStateMiddleware)
 
 
 @app.on_event("startup")

@@ -36,13 +36,11 @@ def verify_payment_webhook(
     Providers should send either:
     - ``X-Avok-Webhook-Secret: <same value as PAYMENT_WEBHOOK_SECRET>`` (simple shared secret), or
     - ``X-Avok-Webhook-Signature: sha256=<hex>`` where hex = HMAC_SHA256(secret, raw_body).
+    
+    SECURITY: Webhook secret is ALWAYS required. Debug mode does not bypass validation.
     """
     if not webhook_secret or not webhook_secret.strip():
-        if debug:
-            logger.warning(
-                "PAYMENT_WEBHOOK_SECRET is unset; accepting payment callback (DEBUG only — never in production)"
-            )
-            return
+        logger.error("PAYMENT_WEBHOOK_SECRET is not configured - rejecting webhook")
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Payment webhooks are not configured (set PAYMENT_WEBHOOK_SECRET)",

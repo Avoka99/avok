@@ -1,11 +1,23 @@
 import pytest
 from datetime import datetime, timedelta
+from sqlalchemy import select
 
 from app.services.escrow import EscrowService
+from app.services.order import OrderService
 from app.core.exceptions import EscrowError
 from app.models.user import User, UserRole, UserStatus
 from app.models.order import DeliveryMethod, Order, OrderStatus
 from app.models.wallet import Wallet, WalletType
+
+
+async def _get_wallet(db_session, wallet_id: int) -> Wallet:
+    result = await db_session.execute(select(Wallet).where(Wallet.id == wallet_id))
+    return result.scalar_one()
+
+
+async def _get_order(db_session, order_id: int) -> Order:
+    result = await db_session.execute(select(Order).where(Order.id == order_id))
+    return result.scalar_one()
 
 
 @pytest.mark.asyncio
@@ -16,14 +28,14 @@ async def test_create_escrow_order(db_session):
         phone_number="0241234567",
         hashed_password="hashed",
         full_name="Test Buyer",
-        role=UserRole.BUYER,
+        role=UserRole.USER,
         status=UserStatus.ACTIVE,
     )
     seller = User(
         phone_number="0247654321",
         hashed_password="hashed",
         full_name="Test Seller",
-        role=UserRole.SELLER,
+        role=UserRole.USER,
         status=UserStatus.ACTIVE,
     )
     db_session.add_all([buyer, seller])
@@ -59,14 +71,14 @@ async def test_hold_funds_in_escrow(db_session):
         phone_number="0241234567",
         hashed_password="hashed",
         full_name="Test Buyer",
-        role=UserRole.BUYER,
+        role=UserRole.USER,
         status=UserStatus.ACTIVE,
     )
     seller = User(
         phone_number="0247654321",
         hashed_password="hashed",
         full_name="Test Seller",
-        role=UserRole.SELLER,
+        role=UserRole.USER,
         status=UserStatus.ACTIVE,
     )
     db_session.add_all([buyer, seller])
@@ -110,15 +122,56 @@ async def test_hold_funds_in_escrow(db_session):
     )
     
     # Verify wallet balances
-    await db_session.refresh(wallet)
+    wallet = await _get_wallet(db_session, wallet.id)
     assert wallet.available_balance == 99.0  # 200 - 101
     assert wallet.escrow_balance == 101.0
     
     # Verify order status
-    await db_session.refresh(order)
+    order = await _get_order(db_session, order.id)
     assert order.escrow_status == OrderStatus.PAYMENT_CONFIRMED
-    assert order.escrow_release_date is not None
-    assert order.escrow_release_date > datetime.utcnow()
+    assert order.escrow_release_date is None
+
+
+@pytest.mark.asyncio
+async def test_mark_order_as_shipped_starts_auto_release_countdown(db_session):
+    buyer = User(
+        phone_number="0241234569",
+        hashed_password="hashed",
+        full_name="Test Buyer",
+        role=UserRole.USER,
+        status=UserStatus.ACTIVE,
+    )
+    seller = User(
+        phone_number="0247654329",
+        hashed_password="hashed",
+        full_name="Test Seller",
+        role=UserRole.USER,
+        status=UserStatus.ACTIVE,
+    )
+    db_session.add_all([buyer, seller])
+    await db_session.commit()
+
+    order = Order(
+        order_reference="AVOK-SHIP123",
+        buyer_id=buyer.id,
+        seller_id=seller.id,
+        product_name="Test Product",
+        product_price=100.0,
+        platform_fee=1.0,
+        total_amount=101.0,
+        entry_fee=1.0,
+        escrow_status=OrderStatus.PAYMENT_CONFIRMED,
+        delivery_method=DeliveryMethod.PICKUP,
+    )
+    db_session.add(order)
+    await db_session.commit()
+
+    order_service = OrderService(db_session)
+    shipped_order = await order_service.mark_order_as_shipped(order.id, seller.id, tracking_number="TRACK-1")
+
+    assert shipped_order.escrow_status == OrderStatus.SHIPPED
+    assert shipped_order.escrow_release_date is not None
+    assert shipped_order.escrow_release_date > datetime.utcnow()
 
 
 @pytest.mark.asyncio
@@ -127,14 +180,14 @@ async def test_release_funds_closes_escrow_and_credits_recipient(db_session):
         phone_number="0241234567",
         hashed_password="hashed",
         full_name="Test Buyer",
-        role=UserRole.BUYER,
+        role=UserRole.USER,
         status=UserStatus.ACTIVE,
     )
     seller = User(
         phone_number="0247654321",
         hashed_password="hashed",
         full_name="Test Seller",
-        role=UserRole.SELLER,
+        role=UserRole.USER,
         status=UserStatus.ACTIVE,
     )
     db_session.add_all([buyer, seller])
@@ -163,9 +216,9 @@ async def test_release_funds_closes_escrow_and_credits_recipient(db_session):
     escrow_service = EscrowService(db_session)
     transaction = await escrow_service.release_funds_to_seller(order.id)
 
-    await db_session.refresh(order)
-    await db_session.refresh(buyer_wallet)
-    await db_session.refresh(seller_wallet)
+    order = await _get_order(db_session, order.id)
+    buyer_wallet = await _get_wallet(db_session, buyer_wallet.id)
+    seller_wallet = await _get_wallet(db_session, seller_wallet.id)
 
     assert transaction.net_amount == 100.0
     assert order.escrow_status == OrderStatus.COMPLETED
@@ -181,14 +234,14 @@ async def test_cannot_release_same_checkout_session_twice(db_session):
         phone_number="0241234567",
         hashed_password="hashed",
         full_name="Test Buyer",
-        role=UserRole.BUYER,
+        role=UserRole.USER,
         status=UserStatus.ACTIVE,
     )
     seller = User(
         phone_number="0247654321",
         hashed_password="hashed",
         full_name="Test Seller",
-        role=UserRole.SELLER,
+        role=UserRole.USER,
         status=UserStatus.ACTIVE,
     )
     db_session.add_all([buyer, seller])
@@ -227,7 +280,7 @@ async def test_cannot_refund_completed_checkout_session(db_session):
         phone_number="0241234567",
         hashed_password="hashed",
         full_name="Test Buyer",
-        role=UserRole.BUYER,
+        role=UserRole.USER,
         status=UserStatus.ACTIVE,
     )
     db_session.add(buyer)
@@ -264,7 +317,7 @@ async def test_release_to_external_recipient_applies_capped_fee_and_closes_tempo
         phone_number="0241234500",
         hashed_password="hashed",
         full_name="Test Buyer",
-        role=UserRole.BUYER,
+        role=UserRole.USER,
         status=UserStatus.ACTIVE,
     )
     db_session.add(buyer)
@@ -302,8 +355,8 @@ async def test_release_to_external_recipient_applies_capped_fee_and_closes_tempo
     escrow_service = EscrowService(db_session)
     transaction = await escrow_service.release_funds_to_seller(order.id)
 
-    await db_session.refresh(order)
-    await db_session.refresh(buyer_wallet)
+    order = await _get_order(db_session, order.id)
+    buyer_wallet = await _get_wallet(db_session, buyer_wallet.id)
 
     assert transaction.fee_amount == 30.0
     assert transaction.net_amount == 5970.0
@@ -314,3 +367,47 @@ async def test_release_to_external_recipient_applies_capped_fee_and_closes_tempo
     assert order.escrow_status == OrderStatus.COMPLETED
     assert order.release_fee == 30.0
     assert order.escrow_account_active is False
+
+
+@pytest.mark.asyncio
+async def test_can_auto_release_only_after_shipment_window_starts(db_session):
+    buyer = User(
+        phone_number="0241234510",
+        hashed_password="hashed",
+        full_name="Test Buyer",
+        role=UserRole.USER,
+        status=UserStatus.ACTIVE,
+    )
+    seller = User(
+        phone_number="0247654330",
+        hashed_password="hashed",
+        full_name="Test Seller",
+        role=UserRole.USER,
+        status=UserStatus.ACTIVE,
+    )
+    db_session.add_all([buyer, seller])
+    await db_session.commit()
+
+    order = Order(
+        order_reference="AVOK-AUTO123",
+        buyer_id=buyer.id,
+        seller_id=seller.id,
+        product_name="Test Product",
+        product_price=100.0,
+        platform_fee=1.0,
+        total_amount=101.0,
+        entry_fee=1.0,
+        escrow_status=OrderStatus.PAYMENT_CONFIRMED,
+        delivery_method=DeliveryMethod.PICKUP,
+        escrow_release_date=datetime.utcnow() - timedelta(days=1),
+    )
+    db_session.add(order)
+    await db_session.commit()
+
+    order = await _get_order(db_session, order.id)
+    assert order.can_auto_release() is False
+
+    order.escrow_status = OrderStatus.SHIPPED
+    await db_session.commit()
+    order = await _get_order(db_session, order.id)
+    assert order.can_auto_release() is True

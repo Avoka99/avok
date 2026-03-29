@@ -46,7 +46,7 @@ class WalletService:
         source_reference: str,
     ) -> Transaction:
         """Deposit external funds into a verified Avok account."""
-        wallet = await self._get_wallet(user_id)
+        wallet = await self._get_wallet_with_lock(user_id)
         user = await self._get_user(user_id)
 
         if not is_verified_account(user):
@@ -108,7 +108,7 @@ class WalletService:
         bank_name: Optional[str] = None,
     ) -> Transaction:
         """Initiate withdrawal request."""
-        wallet = await self._get_wallet(user_id)
+        wallet = await self._get_wallet_with_lock(user_id)
         
         if amount <= 0:
             raise ValidationError("Withdrawal amount must be positive")
@@ -184,7 +184,7 @@ class WalletService:
         if transaction.status != TransactionStatus.PENDING:
             raise ValidationError("Transaction already processed")
         
-        wallet = await self._get_wallet_by_id(transaction.wallet_id)
+        wallet = await self._get_wallet_by_id_with_lock(transaction.wallet_id)
         
         # Process actual payout (integrate with Mobile Money API)
         try:
@@ -281,6 +281,29 @@ class WalletService:
         wallet = result.scalar_one_or_none()
         if not wallet:
             raise NotFoundError("Wallet", wallet_id)
+        return wallet
+    
+    async def _get_wallet_by_id_with_lock(self, wallet_id: int) -> Wallet:
+        """Get wallet by ID with row-level lock to prevent race conditions."""
+        result = await self.db.execute(
+            select(Wallet).where(Wallet.id == wallet_id).with_for_update()
+        )
+        wallet = result.scalar_one_or_none()
+        if not wallet:
+            raise NotFoundError("Wallet", wallet_id)
+        return wallet
+    
+    async def _get_wallet_with_lock(self, user_id: int) -> Wallet:
+        """Get user's main wallet with row-level lock to prevent race conditions."""
+        result = await self.db.execute(
+            select(Wallet).where(
+                Wallet.user_id == user_id,
+                Wallet.wallet_type == WalletType.MAIN
+            ).with_for_update()
+        )
+        wallet = result.scalar_one_or_none()
+        if not wallet:
+            raise NotFoundError("Wallet", user_id)
         return wallet
     
     async def _get_transaction(self, transaction_id: int) -> Transaction:

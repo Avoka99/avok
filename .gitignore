@@ -44,3 +44,7 @@ celerybeat-schedule
 .aider*
 node_modules/
 frontend/node_modules/
+
+# Next.js build output
+frontend/.next/
+frontend/out/

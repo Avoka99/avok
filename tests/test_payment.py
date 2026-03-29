@@ -1,4 +1,10 @@
+from app.core.finance import get_payment_security_requirements
+from app.main import app
+from app.api.dependencies import get_current_admin
+from app.models.user import UserRole
+from app.models.user import KYCStatus, User, UserStatus
 from app.models.transaction import TransactionStatus, TransactionType
+from app.services.merchant import MerchantService
 from app.schemas.order import GuestCheckoutCreate
 from app.schemas.payment import MobileMoneyProvider, PaymentInitiate
 
@@ -45,3 +51,145 @@ def test_guest_checkout_schema_accepts_temporary_payer_details():
 
     assert payload.guest_phone_number == "0241234567"
     assert payload.recipient_display_name == "External Recipient"
+
+
+def test_low_risk_external_payment_stays_fast():
+    requirements = get_payment_security_requirements(250, "momo", is_guest=True)
+
+    assert requirements["tier"] == "low"
+    assert requirements["can_proceed"] is True
+    assert requirements["requires_kyc"] is False
+
+
+def test_medium_risk_external_payment_requires_phone_for_registered_users():
+    user = User(
+        phone_number="0241234567",
+        hashed_password="hash",
+        full_name="Buyer",
+        status=UserStatus.ACTIVE,
+        is_phone_verified=False,
+        kyc_status=KYCStatus.NOT_SUBMITTED,
+    )
+
+    requirements = get_payment_security_requirements(1500, "momo", user=user, is_guest=False)
+
+    assert requirements["tier"] == "medium_registered"
+    assert requirements["requires_phone_verification"] is True
+    assert requirements["can_proceed"] is False
+
+
+def test_high_risk_guest_payment_requires_registration():
+    requirements = get_payment_security_requirements(4500, "bank", is_guest=True)
+
+    assert requirements["tier"] == "high_guest"
+    assert requirements["can_proceed"] is True
+    assert requirements["requires_kyc"] is False
+
+
+def test_merchant_intent_signature_helpers_are_consistent():
+    payload = {
+        "product_price": 4200,
+        "merchant_name": "Secure Merchant",
+        "items": [{"item_name": "Machine", "quantity": 1, "unit_price": 4200}],
+    }
+
+    canonical_payload = MerchantService._canonicalize_payload(payload)
+    signature = MerchantService.sign_payload("super-secret-key", canonical_payload)
+
+    assert signature.startswith("sha256=")
+    assert signature == MerchantService.sign_payload("super-secret-key", canonical_payload)
+
+
+def test_signed_embed_intent_can_be_fetched_and_used_for_guest_checkout(client):
+    admin = User(
+        phone_number="0240000011",
+        hashed_password="hash",
+        full_name="Admin Merchant Owner",
+        role=UserRole.ADMIN,
+        status=UserStatus.ACTIVE,
+    )
+
+    async def override_get_current_admin():
+        return admin
+
+    app.dependency_overrides[get_current_admin] = override_get_current_admin
+    try:
+        merchant_response = client.post(
+            "/api/v1/payments/merchants",
+            json={
+                "id": "merchant_secure_1",
+                "name": "Secure Merchant",
+                "secret_key": "super-secret-key-123456",
+                "allowed_return_urls": ["https://merchant.example.com/return"],
+                "allowed_cancel_urls": ["https://merchant.example.com/cancel"],
+            },
+        )
+    finally:
+        app.dependency_overrides.pop(get_current_admin, None)
+
+    assert merchant_response.status_code == 200, merchant_response.text
+
+    intent_payload = {
+        "seller_display_name": "Trusted Recipient",
+        "seller_contact": "0247000000",
+        "payout_destination": "momo",
+        "payout_reference": "0247000000",
+        "product_name": "Trusted Machine",
+        "product_description": "Trusted merchant payload",
+        "product_price": 4200,
+        "items": [{"item_name": "Trusted Machine", "quantity": 1, "unit_price": 4200}],
+        "delivery_method": "pickup",
+        "payment_source": "momo",
+        "merchant_name": "Secure Merchant",
+        "return_url": "https://merchant.example.com/return",
+        "cancel_url": "https://merchant.example.com/cancel",
+        "metadata": {"cart_id": "CART-1"},
+    }
+    signature = MerchantService.sign_payload(
+        "super-secret-key-123456",
+        MerchantService._canonicalize_payload(intent_payload),
+    )
+
+    intent_response = client.post(
+        "/api/v1/payments/embed/intents",
+        headers={
+            "X-Avok-Merchant-Id": "merchant_secure_1",
+            "X-Avok-Signature": signature,
+        },
+        json=intent_payload,
+    )
+    assert intent_response.status_code == 200, intent_response.text
+    intent_data = intent_response.json()
+    assert "intent_reference" in intent_data
+    assert intent_data["checkout_url"].endswith(f"/payments?intent={intent_data['intent_reference']}")
+
+    fetch_response = client.get(f"/api/v1/payments/embed/intents/{intent_data['intent_reference']}")
+    assert fetch_response.status_code == 200, fetch_response.text
+    fetched_intent = fetch_response.json()
+    assert fetched_intent["merchant_name"] == "Secure Merchant"
+    assert fetched_intent["payout_reference"] == "0247000000"
+
+    checkout_response = client.post(
+        "/api/v1/checkout/sessions/guest",
+        json={
+            "guest_phone_number": "0242223333",
+            "guest_full_name": "Guest Embedded Payer",
+            "guest_email": "guest-embed@example.com",
+            "merchant_intent_reference": intent_data["intent_reference"],
+            "recipient_display_name": "Spoofed Recipient",
+            "recipient_contact": "0249999999",
+            "payout_destination": "bank",
+            "payout_reference": "9999999999",
+            "product_name": "Spoofed Product",
+            "product_price": 1,
+            "delivery_method": "pickup",
+            "payment_source": "momo",
+        },
+    )
+
+    assert checkout_response.status_code == 200, checkout_response.text
+    checkout_payload = checkout_response.json()
+    assert checkout_payload["recipient_display_name"] == "Trusted Recipient"
+    assert checkout_payload["payout_reference"] == "0247000000"
+    assert checkout_payload["product_name"] == "Trusted Machine"
+    assert checkout_payload["product_price"] == 4200

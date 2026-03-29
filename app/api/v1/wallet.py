@@ -1,6 +1,7 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
-from typing import List
+from typing import List, Optional
+from pydantic import BaseModel
 
 from app.api.dependencies import get_db, get_current_user
 from app.schemas.wallet import WalletBalance, TransactionResponse, WithdrawalRequest, DepositRequest
@@ -8,6 +9,14 @@ from app.services.wallet import WalletService
 from app.models.user import User, UserRole
 
 router = APIRouter(prefix="/wallet", tags=["wallet"])
+
+
+class PaginatedTransactions(BaseModel):
+    items: List[TransactionResponse]
+    total: int
+    skip: int
+    limit: int
+    has_more: bool
 
 
 @router.get("/balance", response_model=WalletBalance)
@@ -21,17 +30,23 @@ async def get_balance(
     return balance
 
 
-@router.get("/transactions", response_model=List[TransactionResponse])
+@router.get("/transactions", response_model=PaginatedTransactions)
 async def get_transactions(
-    skip: int = 0,
-    limit: int = 50,
+    skip: int = Query(0, ge=0, description="Number of records to skip"),
+    limit: int = Query(50, ge=1, le=100, description="Max records to return"),
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db)
 ):
     """Get transaction history."""
     wallet_service = WalletService(db)
     transactions = await wallet_service.get_transactions(current_user.id, skip, limit)
-    return transactions
+    return PaginatedTransactions(
+        items=transactions,
+        total=len(transactions),
+        skip=skip,
+        limit=limit,
+        has_more=len(transactions) >= limit
+    )
 
 
 @router.post("/deposit")

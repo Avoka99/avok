@@ -18,6 +18,7 @@ class OrderStatus(str, enum.Enum):
     COMPLETED = "completed"
     DISPUTED = "disputed"
     CANCELLED = "cancelled"
+    PENDING_REVIEW = "pending_review"
     REFUNDED = "refunded"
 
 
@@ -33,7 +34,8 @@ class Order(Base):
     id = Column(Integer, primary_key=True, index=True)
     order_reference = Column(String(50), unique=True, nullable=False, index=True)
     
-    buyer_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
+    buyer_id = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    guest_checkout_session_id = Column(Integer, ForeignKey("guest_checkout_sessions.id", ondelete="SET NULL"), nullable=True)
     seller_id = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
 
     # External / guest seller payout details
@@ -86,7 +88,9 @@ class Order(Base):
     
     # Relationships
     buyer = relationship("User", foreign_keys=[buyer_id], back_populates="orders_as_buyer")
+    guest_checkout_session = relationship("GuestCheckoutSession", back_populates="orders")
     seller = relationship("User", foreign_keys=[seller_id], back_populates="orders_as_seller")
+    items = relationship("OrderItem", back_populates="order", cascade="all, delete-orphan")
     transactions = relationship("Transaction", back_populates="order")
     dispute = relationship("Dispute", back_populates="order", uselist=False)
     otp_delivery = relationship("OTPDelivery", back_populates="order", uselist=False)
@@ -100,9 +104,16 @@ class Order(Base):
     
     def can_auto_release(self) -> bool:
         """Check if order is eligible for auto-release."""
-        if not self.escrow_release_date:
+        if not self.escrow_account_active or not self.escrow_release_date:
+            return False
+        if self.escrow_status not in {OrderStatus.SHIPPED, OrderStatus.DELIVERED}:
             return False
         return datetime.utcnow() >= self.escrow_release_date
+
+    def start_auto_release_window(self, release_days: int) -> datetime:
+        """Start or refresh the escrow auto-release countdown from the delivery phase."""
+        self.escrow_release_date = datetime.utcnow() + timedelta(days=release_days)
+        return self.escrow_release_date
     
     def days_until_auto_release(self) -> Optional[int]:
         """Get days remaining until auto-release."""
@@ -123,6 +134,18 @@ class Order(Base):
         return self.buyer_id
 
     @property
+    def guest_payer_name(self) -> Optional[str]:
+        return self.guest_checkout_session.full_name if self.guest_checkout_session else None
+
+    @property
+    def guest_payer_phone_number(self) -> Optional[str]:
+        return self.guest_checkout_session.phone_number if self.guest_checkout_session else None
+
+    @property
+    def guest_payer_email(self) -> Optional[str]:
+        return self.guest_checkout_session.email if self.guest_checkout_session else None
+
+    @property
     def recipient_id(self) -> Optional[int]:
         return self.seller_id
 
@@ -137,3 +160,7 @@ class Order(Base):
     @property
     def is_guest_checkout(self) -> bool:
         return bool((self.payout_metadata or {}).get("guest_checkout", False))
+
+    @property
+    def item_count(self) -> int:
+        return sum(item.quantity for item in self.items) if self.items else 0

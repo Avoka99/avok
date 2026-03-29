@@ -1,18 +1,23 @@
 import json
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
+from pydantic import ValidationError as PydanticValidationError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.dependencies import (
-    get_current_user,
+    get_current_checkout_actor,
+    get_current_admin,
     get_db,
     require_payment_sandbox_enabled,
 )
 from app.core.config import settings
+from app.core.exceptions import NotFoundError, ValidationError
 from app.core.payment_webhook import verify_payment_webhook
-from app.models.user import User
+from app.schemas.merchant import MerchantCreate, MerchantIntentCreate, MerchantIntentPayload, MerchantIntentResponse, MerchantResponse
 from app.schemas.payment import PaymentCallback, PaymentInitiate, PaymentResponse
+from app.models.user import User
+from app.services.merchant import MerchantService
 from app.services.order import OrderService
 from app.services.payment import PaymentService
 
@@ -21,25 +26,47 @@ router = APIRouter(prefix="/payments", tags=["payments"])
 SandboxGuard = Annotated[None, Depends(require_payment_sandbox_enabled)]
 
 
+@router.get("/embed/intents/{intent_reference}", response_model=MerchantIntentPayload)
+async def get_embed_intent(
+    intent_reference: str,
+    db: AsyncSession = Depends(get_db),
+):
+    service = MerchantService(db)
+    try:
+        return await service.get_checkout_intent(intent_reference)
+    except ValidationError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=exc.message)
+    except NotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=exc.message)
+
+
 @router.post("/initiate", response_model=PaymentResponse)
 async def initiate_payment(
     payment_data: PaymentInitiate,
-    current_user: User = Depends(get_current_user),
+    current_user = Depends(get_current_checkout_actor),
     db: AsyncSession = Depends(get_db),
 ):
     """Initiate payment for a checkout session."""
+    if not payment_data.session_reference:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="session_reference is required")
+
     order_service = OrderService(db)
     payment_service = PaymentService(db)
     order = await order_service.get_order(payment_data.session_reference)
 
-    if order.buyer_id != current_user.id:
+    is_guest_actor = getattr(current_user, "is_guest", False)
+    if is_guest_actor:
+        if order.guest_checkout_session_id != current_user.guest_session_id:
+            raise HTTPException(status_code=403, detail="Only the payer can initiate payment")
+    elif order.buyer_id != current_user.id:
         raise HTTPException(status_code=403, detail="Only the payer can initiate payment")
 
     result = await payment_service.initiate_payment(
         order_id=order.id,
         funding_source=payment_data.funding_source,
         payout_destination=payment_data.payout_destination,
-        buyer=current_user,
+        buyer=None if is_guest_actor else current_user,
+        guest_checkout_session=order.guest_checkout_session if is_guest_actor else None,
         momo_provider=payment_data.momo_provider,
         momo_number=payment_data.momo_number,
         bank_reference=payment_data.bank_reference,
@@ -90,7 +117,7 @@ async def payment_callback(request: Request, db: AsyncSession = Depends(get_db))
 async def sandbox_payment_success(
     _: SandboxGuard,
     transaction_reference: str,
-    current_user: User = Depends(get_current_user),
+    current_user = Depends(get_current_checkout_actor),
     db: AsyncSession = Depends(get_db),
 ):
     """Simulate a successful payment in local development."""
@@ -113,7 +140,7 @@ async def sandbox_payment_success(
 async def sandbox_payment_fail(
     _: SandboxGuard,
     transaction_reference: str,
-    current_user: User = Depends(get_current_user),
+    current_user = Depends(get_current_checkout_actor),
     db: AsyncSession = Depends(get_db),
 ):
     """Simulate a failed payment in local development."""

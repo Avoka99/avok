@@ -19,13 +19,13 @@ USERS = [
         "phone_number": "0241111111",
         "full_name": "Local Buyer",
         "email": "buyer@avok.local",
-        "role": UserRole.BUYER,
+        "role": UserRole.USER,
     },
     {
         "phone_number": "0242222222",
         "full_name": "Local Seller",
         "email": "seller@avok.local",
-        "role": UserRole.SELLER,
+        "role": UserRole.USER,
     },
     {
         "phone_number": "0559211947",
@@ -63,7 +63,7 @@ async def main() -> None:
                     Wallet(
                         user_id=user.id,
                         wallet_type=WalletType.MAIN,
-                        available_balance=1000.0 if user.role == UserRole.BUYER else 0.0,
+                        available_balance=1000.0 if user.role == UserRole.USER else 0.0,
                         pending_balance=0.0,
                         escrow_balance=0.0,
                     )

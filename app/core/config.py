@@ -8,6 +8,7 @@ class Settings(BaseSettings):
     app_name: str = Field(default="Avok", env="APP_NAME")
     app_env: str = Field(default="development", env="APP_ENV")
     debug: bool = Field(default=False, env="DEBUG")
+    frontend_base_url: str = Field(default="http://localhost:3000", env="FRONTEND_BASE_URL")
     enable_openapi_docs: bool = Field(
         default=False,
         env="ENABLE_OPENAPI_DOCS",
@@ -62,6 +63,16 @@ class Settings(BaseSettings):
     
     # Admin
     min_admin_approvals: int = Field(default=2, env="MIN_ADMIN_APPROVALS")
+    
+    # Fraud Detection
+    fraud_high_risk_threshold: int = Field(default=70, env="FRAUD_HIGH_RISK_THRESHOLD")
+    fraud_medium_risk_threshold: int = Field(default=50, env="FRAUD_MEDIUM_RISK_THRESHOLD")
+    fraud_low_risk_threshold: int = Field(default=40, env="FRAUD_LOW_RISK_THRESHOLD")
+    fraud_max_dispute_count: int = Field(default=3, env="FRAUD_MAX_DISPUTE_COUNT")
+    fraud_high_value_threshold: float = Field(default=1000.0, env="FRAUD_HIGH_VALUE_THRESHOLD")
+    fraud_new_account_days: int = Field(default=7, env="FRAUD_NEW_ACCOUNT_DAYS")
+    fraud_auto_flag_threshold: int = Field(default=80, env="FRAUD_AUTO_FLAG_THRESHOLD")
+    fraud_completion_rate_threshold: float = Field(default=0.5, env="FRAUD_COMPLETION_RATE_THRESHOLD")
     
     # Security
     allowed_origins: List[str] = Field(default=["*"], env="ALLOWED_ORIGINS")

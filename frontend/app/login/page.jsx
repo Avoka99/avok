@@ -33,8 +33,8 @@ export default function LoginPage() {
           tokenRole = payload?.role || null;
         } catch {}
       }
-      const role = tokenRole === "admin" || tokenRole === "super_admin" ? "admin" : data?.user?.role || tokenRole || "buyer";
-      const target = role === "seller" ? "/seller" : role === "admin" ? "/admin" : "/buyer";
+      const role = tokenRole === "admin" || tokenRole === "super_admin" ? "admin" : data?.user?.role || tokenRole || "user";
+      const target = role === "admin" ? "/admin" : role === "super_admin" ? "/super-admin" : "/buyer";
       router.push(target);
     } catch (submitError) {
       setError(submitError.message);

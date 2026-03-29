@@ -1,53 +1,74 @@
 "use client";
 
 import { useEffect } from "react";
+import { useQuery } from "@tanstack/react-query";
 import { useRouter, useSearchParams } from "next/navigation";
+
+import { api } from "@/lib/api";
 import { usePaymentFlowStore } from "@/stores/payment-flow-store";
 
 export default function PaymentsPage() {
   const router = useRouter();
   const searchParams = useSearchParams();
+  const intentReference = searchParams.get("intent");
   const { setDraftOrder, clearDraftOrder } = usePaymentFlowStore();
 
+  const intentQuery = useQuery({
+    queryKey: ["merchant-intent", intentReference],
+    enabled: Boolean(intentReference),
+    queryFn: async () => {
+      const response = await api.get(`/payments/embed/intents/${intentReference}`);
+      return response.data;
+    }
+  });
+
   useEffect(() => {
-    const seededOrder = {
-      seller_id: searchParams.get("seller_id") || "",
-      seller_display_name: searchParams.get("seller_display_name") || "",
-      seller_contact: searchParams.get("seller_contact") || "",
-      payout_destination: searchParams.get("payout_destination") || "avok_account",
-      payout_reference: searchParams.get("payout_reference") || "",
-      payout_account_name: searchParams.get("payout_account_name") || "",
-      payout_bank_name: searchParams.get("payout_bank_name") || "",
-      product_name: searchParams.get("product_name") || "",
-      product_description: searchParams.get("product_description") || "",
-      product_price: searchParams.get("amount") || searchParams.get("product_price") || "",
-      delivery_method: searchParams.get("delivery_method") || "pickup",
-      shipping_address: searchParams.get("shipping_address") || "",
-      product_url: searchParams.get("product_url") || "",
-      payment_source: searchParams.get("funding_source") || searchParams.get("payment_source") || "verified_account",
-      merchant_name: searchParams.get("merchant_name") || "",
-      return_url: searchParams.get("return_url") || "",
-      cancel_url: searchParams.get("cancel_url") || ""
-    };
-
-    const hasEmbeddedPayload = Object.values(seededOrder).some((value) => value);
-
-    if (!hasEmbeddedPayload) {
+    if (!intentReference) {
       clearDraftOrder();
-      router.replace("/checkout/new");
       return;
     }
 
-    setDraftOrder(seededOrder);
-    router.replace("/checkout/new?embedded=1");
-  }, [clearDraftOrder, router, searchParams, setDraftOrder]);
+    if (!intentQuery.data) {
+      return;
+    }
+
+    const intent = intentQuery.data;
+    setDraftOrder({
+      ...intent,
+      isMerchantVerified: true,
+      merchant_intent_reference: intent.intent_reference
+    });
+    router.replace(`/checkout/new?embedded=1&intent=${intent.intent_reference}`);
+  }, [clearDraftOrder, intentQuery.data, intentReference, router, setDraftOrder]);
+
+  if (!intentReference) {
+    return (
+      <div className="card rounded-[28px] p-6">
+        <p className="text-sm font-semibold uppercase tracking-[0.18em] text-stone-500">Pay with Avok</p>
+        <h2 className="mt-3 text-3xl font-black">Missing secure checkout intent</h2>
+        <p className="mt-3 max-w-2xl text-sm leading-7 text-stone-600">
+          This embedded checkout link is missing the server-issued intent reference Avok needs to trust the merchant payload.
+        </p>
+      </div>
+    );
+  }
+
+  if (intentQuery.isError) {
+    return (
+      <div className="card rounded-[28px] p-6">
+        <p className="text-sm font-semibold uppercase tracking-[0.18em] text-stone-500">Pay with Avok</p>
+        <h2 className="mt-3 text-3xl font-black">Secure checkout could not be prepared</h2>
+        <p className="mt-3 max-w-2xl text-sm leading-7 text-stone-600">{intentQuery.error.message}</p>
+      </div>
+    );
+  }
 
   return (
     <div className="card rounded-[28px] p-6">
       <p className="text-sm font-semibold uppercase tracking-[0.18em] text-stone-500">Pay with Avok</p>
       <h2 className="mt-3 text-3xl font-black">Preparing secure checkout session</h2>
       <p className="mt-3 max-w-2xl text-sm leading-7 text-stone-600">
-        Avok is loading the product and payout details sent from the external website, then moving you into checkout so you do not need to enter them again.
+        Avok is loading the merchant-signed checkout intent from the server, then moving you into checkout with trusted product and payout details.
       </p>
     </div>
   );

@@ -1,10 +1,11 @@
 from datetime import datetime
 from typing import Optional
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 from app.models.admin_action import AdminActionStatus, AdminActionType
 from app.models.dispute import DisputeStatus, DisputeType
+from app.models.user import KYCStatus, UserRole, UserStatus
 
 
 class AdminDashboardResponse(BaseModel):
@@ -49,3 +50,22 @@ class AdminActionQueueItem(BaseModel):
     created_at: datetime
     reason: str
     resolution: Optional[str] = None
+
+
+class AdminUserResponse(BaseModel):
+    """Admin view of user - excludes sensitive fields."""
+    model_config = ConfigDict(from_attributes=True)
+    
+    id: int
+    phone_number: Optional[str] = None
+    email: Optional[str] = None
+    full_name: Optional[str] = None
+    role: UserRole
+    status: UserStatus
+    kyc_status: KYCStatus
+    is_phone_verified: bool
+    is_flagged: bool
+    fraud_score: Optional[int] = None
+    dispute_count: int = 0
+    created_at: datetime
+    updated_at: Optional[datetime] = None

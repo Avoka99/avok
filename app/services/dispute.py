@@ -226,10 +226,6 @@ class DisputeService:
             
         elif normalized_resolution == "recipient_wins":
             # Release funds to recipient
-            order = await self._get_order(dispute.order_id)
-            order.escrow_status = OrderStatus.DELIVERED
-            await self.db.commit()
-            
             await self.escrow_service.release_funds_to_seller(
                 dispute.order_id,
                 admin_approved=True

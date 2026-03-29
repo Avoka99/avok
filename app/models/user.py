@@ -10,10 +10,9 @@ from app.core.database import Base
 
 
 class UserRole(str, enum.Enum):
-    BUYER = "buyer"
-    SELLER = "seller"
-    ADMIN = "admin"
-    SUPER_ADMIN = "super_admin"
+    USER = "USER"
+    ADMIN = "ADMIN"
+    SUPER_ADMIN = "SUPER_ADMIN"
 
 
 class UserStatus(str, enum.Enum):
@@ -40,7 +39,7 @@ class User(Base):
     hashed_password = Column(String(255), nullable=False)
     
     full_name = Column(String(255), nullable=False)
-    role = Column(Enum(UserRole), default=UserRole.BUYER, nullable=False)
+    role = Column(Enum(UserRole), default=UserRole.USER, nullable=False)
     status = Column(Enum(UserStatus), default=UserStatus.PENDING, nullable=False)
     
     # KYC Information

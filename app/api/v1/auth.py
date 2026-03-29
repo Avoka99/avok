@@ -5,7 +5,8 @@ from datetime import datetime
 from app.api.dependencies import get_db, get_current_user, get_current_super_admin
 from app.schemas.user import (
     UserCreate, UserLogin, UserResponse, Token, 
-    PhoneVerificationSend, PhoneVerificationRequest, KYCSubmission, AdminRoleRequest
+    PhoneVerificationSend, PhoneVerificationRequest, KYCSubmission, AdminRoleRequest,
+    UserMeResponse
 )
 from app.services.auth import AuthService
 from app.core.security import create_access_token, create_refresh_token
@@ -47,6 +48,14 @@ async def login(
     refresh_token = create_refresh_token(data={"sub": str(user.id)})
     
     return {"access_token": access_token, "refresh_token": refresh_token}
+
+
+@router.get("/me", response_model=UserMeResponse)
+async def get_current_user_info(
+    current_user = Depends(get_current_user)
+):
+    """Get current authenticated user's profile."""
+    return current_user
 
 
 @router.post("/verify/phone/send")

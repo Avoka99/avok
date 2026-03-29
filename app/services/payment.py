@@ -6,15 +6,18 @@ from datetime import datetime
 
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
+from sqlalchemy.orm import selectinload
 
 from app.core.exceptions import PaymentError, NotFoundError
 from app.core.config import settings
-from app.core.finance import calculate_capped_fee, is_verified_account
+from app.core.finance import calculate_capped_fee, get_payment_security_requirements, is_verified_account
 from app.models.transaction import Transaction, TransactionStatus, TransactionType
+from app.models.guest_checkout import GuestCheckoutSession
 from app.models.order import Order, OrderStatus
 from app.models.user import User
 from app.services.escrow import EscrowService
 from app.services.notification import NotificationService
+from app.services.fraud_detection import FraudDetectionService
 from app.integrations.mtn_momo_collection import try_mtn_momo_checkout
 
 logger = logging.getLogger(__name__)
@@ -27,13 +30,15 @@ class PaymentService:
         self.db = db
         self.escrow_service = EscrowService(db)
         self.notification_service = NotificationService(db)
+        self.fraud_service = FraudDetectionService(db)
     
     async def initiate_payment(
         self,
         order_id: int,
         funding_source: str,
         payout_destination: str,
-        buyer: User,
+        buyer: Optional[User] = None,
+        guest_checkout_session: Optional[GuestCheckoutSession] = None,
         momo_provider: Optional[str] = None,
         momo_number: Optional[str] = None,
         bank_reference: Optional[str] = None,
@@ -45,6 +50,14 @@ class PaymentService:
             raise PaymentError(f"Checkout session {order.order_reference} cannot be funded")
         
         transaction_reference = f"PAY-{order.order_reference}-{uuid.uuid4().hex[:8]}"
+        security_requirements = get_payment_security_requirements(
+            order.product_price,
+            funding_source,
+            user=buyer,
+            is_guest=guest_checkout_session is not None,
+        )
+        if not security_requirements["can_proceed"]:
+            raise PaymentError(security_requirements["user_message"])
 
         entry_fee = 0.0
         if funding_source != "verified_account":
@@ -53,6 +66,8 @@ class PaymentService:
                 percent=settings.platform_fee_percent,
                 cap_amount=settings.external_transfer_fee_cap,
             )
+        elif buyer is None:
+            raise PaymentError("Guest checkout cannot use verified account funding")
         elif not is_verified_account(buyer):
             raise PaymentError("Only verified Avok accounts can pay directly from wallet balance")
 
@@ -83,6 +98,9 @@ class PaymentService:
                 "payout_destination": payout_destination,
                 "bank_reference": bank_reference,
                 "release_fee": release_fee,
+                "security_tier": security_requirements["tier"],
+                "requires_phone_verification": security_requirements["requires_phone_verification"],
+                "requires_kyc": security_requirements["requires_kyc"],
             },
         )
         
@@ -97,8 +115,22 @@ class PaymentService:
         order.payout_destination = payout_destination
 
         payment_result = {}
+        payment_requires_review = False
+        
         if funding_source == "verified_account":
             await self.db.commit()
+
+            fraud_check = await self.fraud_service.analyze_user(buyer.id)
+            if fraud_check.get("is_fraudulent") or buyer.is_flagged:
+                logger.warning(f"Payment flagged for review: buyer {buyer.id} flagged as fraudulent")
+                order.payout_metadata = order.payout_metadata or {}
+                order.payout_metadata["payment_review"] = {
+                    "reason": "buyer_flagged",
+                    "fraud_score": fraud_check.get("fraud_score", 0),
+                    "flagged_at": datetime.utcnow().isoformat()
+                }
+                payment_requires_review = True
+            
             await self.escrow_service.hold_funds_in_escrow(
                 transaction.order_id,
                 transaction_reference,
@@ -135,6 +167,7 @@ class PaymentService:
             "momo_number": momo_number,
             "payment_url": payment_result.get("payment_url"),
             "instructions": payment_result.get("instructions"),
+            "security_tier": security_requirements["tier"],
             "status": "completed" if funding_source == "verified_account" else "pending"
         }
     
@@ -146,20 +179,31 @@ class PaymentService:
         approval_code: Optional[str] = None
     ) -> Transaction:
         """Handle payment callback from Mobile Money provider."""
-        transaction = await self._get_transaction(transaction_reference)
+        transaction = await self._get_transaction_with_lock(transaction_reference)
         
         if transaction.status != TransactionStatus.PENDING:
             logger.warning(f"Transaction {transaction_reference} already processed")
             return transaction
         
         if status == "success":
-            # Update transaction
+            order = await self._get_order(transaction.order_id)
+
+            if order.buyer_id is not None and order.buyer is not None:
+                fraud_check = await self.fraud_service.analyze_user(order.buyer_id)
+                if fraud_check.get("is_fraudulent") or order.buyer.is_flagged:
+                    logger.warning(f"Payment callback flagged for review: buyer {order.buyer_id}")
+                    order.payout_metadata = order.payout_metadata or {}
+                    order.payout_metadata["payment_review"] = {
+                        "reason": "buyer_flagged_at_callback",
+                        "fraud_score": fraud_check.get("fraud_score", 0),
+                        "flagged_at": datetime.utcnow().isoformat()
+                    }
+            
             transaction.status = TransactionStatus.COMPLETED
             transaction.momo_transaction_id = momo_transaction_id
             transaction.momo_approval_code = approval_code
             transaction.completed_at = datetime.utcnow()
             
-            # Hold funds in escrow
             await self.escrow_service.hold_funds_in_escrow(
                 transaction.order_id,
                 transaction_reference,
@@ -177,7 +221,6 @@ class PaymentService:
             transaction.status = TransactionStatus.FAILED
             transaction.momo_transaction_id = momo_transaction_id
             
-            # Update order status
             order = await self._get_order(transaction.order_id)
             order.escrow_status = OrderStatus.CANCELLED
             
@@ -252,7 +295,12 @@ class PaymentService:
     async def _get_order(self, order_id: int) -> Order:
         """Get order by ID."""
         result = await self.db.execute(
-            select(Order).where(Order.id == order_id)
+            select(Order)
+            .options(
+                selectinload(Order.buyer),
+                selectinload(Order.guest_checkout_session),
+            )
+            .where(Order.id == order_id)
         )
         order = result.scalar_one_or_none()
         if not order:
@@ -263,6 +311,16 @@ class PaymentService:
         """Get transaction by reference."""
         result = await self.db.execute(
             select(Transaction).where(Transaction.reference == reference)
+        )
+        transaction = result.scalar_one_or_none()
+        if not transaction:
+            raise NotFoundError("Transaction", reference)
+        return transaction
+    
+    async def _get_transaction_with_lock(self, reference: str) -> Transaction:
+        """Get transaction by reference with row-level lock to prevent race conditions."""
+        result = await self.db.execute(
+            select(Transaction).where(Transaction.reference == reference).with_for_update()
         )
         transaction = result.scalar_one_or_none()
         if not transaction:

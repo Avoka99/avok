@@ -15,7 +15,7 @@ export default function RegisterPage() {
     phone_number: "",
     email: "",
     password: "",
-    wants_avok_account: true
+    wants_avok_account: true  // Always true - compulsory
   });
   const [message, setMessage] = useState("");
   const [error, setError] = useState("");
@@ -43,80 +43,90 @@ export default function RegisterPage() {
       <div className="card w-full max-w-3xl rounded-[30px] p-6 sm:p-8">
         <h1 className="text-3xl font-black">Create a secure Avok account</h1>
         <p className="mt-2 max-w-2xl text-sm leading-6 text-stone-600">
-          Choose whether you are buying or selling. You can later test KYC upload, phone verification, wallet funding, and the escrow order flow.
+          Every account can both pay and receive money. You can later test KYC upload, phone verification, wallet funding, and the escrow flow from either side of a checkout session.
+        </p>
+        <p className="mt-2 max-w-2xl text-sm leading-6 text-stone-600">
+          If you started as a guest payer, you can register here with the same phone number to turn that temporary checkout history into a full Avok account.
+        </p>
+        <p className="mt-2 max-w-2xl text-sm leading-6 text-stone-600">
+          Avok keeps low-risk checkouts quick. Phone verification is mainly for larger checkout amounts, and full KYC is mainly for using stored balance or higher-risk payments.
         </p>
 
         <form onSubmit={handleSubmit} className="mt-6 grid gap-4 sm:grid-cols-2">
           <div className="sm:col-span-2">
-            <label className="mb-2 block text-sm font-semibold text-stone-700">Full name</label>
+            <label className="mb-2 block text-sm font-semibold text-stone-700">Full name *</label>
             <input
               className="field"
               value={form.full_name}
               onChange={(event) => setForm((prev) => ({ ...prev, full_name: event.target.value }))}
               placeholder="Kwame Mensah"
+              required
             />
           </div>
           <div>
-            <label className="mb-2 block text-sm font-semibold text-stone-700">Phone number</label>
+            <label className="mb-2 block text-sm font-semibold text-stone-700">Phone number *</label>
             <input
               className="field"
               value={form.phone_number}
               onChange={(event) => setForm((prev) => ({ ...prev, phone_number: event.target.value }))}
               placeholder="0241234567"
+              required
             />
           </div>
           <div>
-            <label className="mb-2 block text-sm font-semibold text-stone-700">Email</label>
+            <label className="mb-2 block text-sm font-semibold text-stone-700">Email *</label>
             <input
               type="email"
               className="field"
               value={form.email}
               onChange={(event) => setForm((prev) => ({ ...prev, email: event.target.value }))}
               placeholder="you@example.com"
+              required
             />
           </div>
           <div>
-            <label className="mb-2 block text-sm font-semibold text-stone-700">Password</label>
+            <label className="mb-2 block text-sm font-semibold text-stone-700">Password *</label>
             <input
               type="password"
               className="field"
               value={form.password}
               onChange={(event) => setForm((prev) => ({ ...prev, password: event.target.value }))}
               placeholder="Create a password"
+              required
             />
           </div>
-          <div className="sm:col-span-2 card rounded-[24px] bg-stone-50 p-5 border border-stone-200">
-            <label className="mb-2 block text-sm font-semibold text-stone-700">Would you like an Avok account number to hold money for transactions?</label>
-            <p className="text-sm text-stone-500 mb-4">You can get one now or opt-in later from your dashboard.</p>
-            <div className="flex gap-4">
-              <label className="flex items-center gap-2 cursor-pointer">
-                <input 
-                  type="radio" 
-                  name="wants_avok_account"
-                  checked={form.wants_avok_account === true}
-                  onChange={() => setForm(prev => ({ ...prev, wants_avok_account: true }))}
-                  className="w-5 h-5 text-emerald-600 focus:ring-emerald-500"
-                />
-                <span className="font-medium text-stone-800">Yes, allocate an account</span>
-              </label>
-              <label className="flex items-center gap-2 cursor-pointer">
-                <input 
-                  type="radio" 
-                  name="wants_avok_account"
-                  checked={form.wants_avok_account === false}
-                  onChange={() => setForm(prev => ({ ...prev, wants_avok_account: false }))}
-                  className="w-5 h-5 text-stone-600 focus:ring-stone-500"
-                />
-                <span className="font-medium text-stone-800">No, maybe later</span>
-              </label>
+          <div className="sm:col-span-2 card rounded-[24px] bg-emerald-50 p-5 border border-emerald-200">
+            <div className="flex items-center gap-2">
+              <input 
+                type="checkbox" 
+                checked={true}
+                disabled
+                className="w-5 h-5 text-emerald-600"
+              />
+              <span className="font-medium text-emerald-800">Avok Account Number (Compulsory)</span>
             </div>
+            <p className="text-sm text-emerald-700 mt-2">Every user gets an Avok account number to hold money for escrow and transactions.</p>
           </div>
 
           <div className="card rounded-[24px] bg-stone-50 p-5 sm:col-span-2">
-            <h2 className="text-lg font-bold">KYC and phone verification</h2>
+            <h2 className="text-lg font-bold">What each verification step unlocks</h2>
             <p className="mt-2 text-sm leading-6 text-stone-600">
-              This frontend is ready for ID upload and OTP steps. The UI keeps them visible so users understand why trust checks matter before money moves.
+              Avok asks for the smallest check that matches the risk.
             </p>
+            <div className="mt-4 grid gap-3 sm:grid-cols-3">
+              <div className="rounded-[20px] bg-white p-4">
+                <p className="text-sm font-semibold text-stone-900">Low-risk checkout</p>
+                <p className="mt-2 text-sm leading-6 text-stone-600">Guest or account users can usually pay by MoMo or bank without waiting for full KYC.</p>
+              </div>
+              <div className="rounded-[20px] bg-white p-4">
+                <p className="text-sm font-semibold text-stone-900">Phone verification</p>
+                <p className="mt-2 text-sm leading-6 text-stone-600">Used for larger checkout amounts so Avok can confirm the payer is reachable.</p>
+              </div>
+              <div className="rounded-[20px] bg-white p-4">
+                <p className="text-sm font-semibold text-stone-900">Full KYC</p>
+                <p className="mt-2 text-sm leading-6 text-stone-600">Needed for paying from stored Avok balance and for higher-risk payments that need deeper review.</p>
+              </div>
+            </div>
             <div className="mt-4 grid gap-3 sm:grid-cols-2">
               <input type="file" className="field" />
               <input className="field" placeholder="Enter OTP when sent" />

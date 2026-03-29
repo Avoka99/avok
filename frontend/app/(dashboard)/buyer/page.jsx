@@ -11,18 +11,40 @@ import { api } from "@/lib/api";
 
 export default function BuyerDashboardPage() {
   const queryClient = useQueryClient();
-  const [otp, setOtp] = useState("");
-  const [disputeText, setDisputeText] = useState("");
-  const [selectedReference, setSelectedReference] = useState("");
-  const [evidenceFiles, setEvidenceFiles] = useState([]);
+  const [page, setPage] = useState(0);
+  const limit = 10;
 
   const ordersQuery = useQuery({
-    queryKey: ["buyer-orders"],
+    queryKey: ["buyer-orders", page],
     queryFn: async () => {
-      const response = await api.get("/checkout/sessions");
+      const response = await api.get(`/checkout/sessions?role=buyer&skip=${page * limit}&limit=${limit}`);
       return response.data;
     }
   });
+
+  const [allOrders, setAllOrders] = useState([]);
+  const [hasMore, setHasMore] = useState(false);
+  const [selectedReference, setSelectedReference] = useState(null);
+  const [otp, setOtp] = useState("");
+  const [evidenceFiles, setEvidenceFiles] = useState([]);
+  const [disputeText, setDisputeText] = useState("");
+
+  useMemo(() => {
+    if (ordersQuery.data) {
+      const items = ordersQuery.data.items || [];
+      if (page === 0) {
+        setAllOrders(items);
+      } else {
+        setAllOrders((prev) => {
+          const newItems = items.filter(
+            (item) => !prev.some((p) => (p.order_reference || p.id) === (item.order_reference || item.id))
+          );
+          return [...prev, ...newItems];
+        });
+      }
+      setHasMore(ordersQuery.data.has_more);
+    }
+  }, [ordersQuery.data, page]);
 
   const disputeMutation = useMutation({
     mutationFn: async (payload) => {
@@ -39,21 +61,11 @@ export default function BuyerDashboardPage() {
       }
 
       await queryClient.invalidateQueries({ queryKey: ["buyer-orders"] });
+      setPage(0); // Reset to first page
       setEvidenceFiles([]);
       setDisputeText("");
     }
   });
-
-  const orders = useMemo(() => {
-    const data = ordersQuery.data;
-    if (Array.isArray(data)) {
-      return data;
-    }
-    if (Array.isArray(data?.orders)) {
-      return data.orders;
-    }
-    return [];
-  }, [ordersQuery.data]);
 
   function submitDispute(reference) {
     setSelectedReference(reference);
@@ -68,10 +80,10 @@ export default function BuyerDashboardPage() {
     <div className="space-y-5">
       <section className="grid gap-4 xl:grid-cols-[1.2fr_0.8fr]">
         <div className="card rounded-[28px] p-6">
-          <p className="text-sm font-semibold uppercase tracking-[0.18em] text-stone-500">Payer dashboard</p>
+          <p className="text-sm font-semibold uppercase tracking-[0.18em] text-stone-500">My payments</p>
           <h2 className="mt-3 text-3xl font-black">Track every checkout session and always know who holds the money.</h2>
           <p className="mt-3 max-w-2xl text-sm leading-7 text-stone-600">
-            Payers can see payment state, shipment progress, dispute options, and delivery confirmation in one place without switching between backend tools.
+            See every checkout session where you are the payer, follow delivery progress, and raise disputes without guessing what happens next.
           </p>
         </div>
         <div className="card rounded-[28px] bg-emerald-900 p-6 text-white">
@@ -85,33 +97,47 @@ export default function BuyerDashboardPage() {
       </section>
 
       <section className="space-y-4">
-        {orders.length === 0 ? (
+        {allOrders.length === 0 && !ordersQuery.isLoading ? (
           <div className="card rounded-[24px] p-6">
-            <h3 className="text-xl font-bold">No checkout sessions yet</h3>
+            <h3 className="text-xl font-bold">No payment sessions yet</h3>
             <p className="mt-2 text-sm text-stone-600">Create your first session from checkout or through an embedded Pay with Avok flow.</p>
           </div>
         ) : (
-          orders.map((order) => (
-            <OrderCard
-              key={order.order_reference || order.id}
-              order={order}
-              actions={
-                <>
-                  <Link href={`/checkout/${order.session_reference || order.order_reference}`} className="btn-primary inline-flex items-center gap-2">
-                    <CheckCircle2 className="h-4 w-4" />
-                    Open checkout
-                  </Link>
-                  <button
-                    className="btn-danger inline-flex items-center gap-2"
-                    onClick={() => setSelectedReference(order.session_reference || order.order_reference)}
-                  >
-                    <AlertTriangle className="h-4 w-4" />
-                    Select for dispute
-                  </button>
-                </>
-              }
-            />
-          ))
+          <>
+            {allOrders.map((order) => (
+              <OrderCard
+                key={order.order_reference || order.id}
+                order={order}
+                actions={
+                  <>
+                    <Link href={`/checkout/${order.session_reference || order.order_reference}`} className="btn-primary inline-flex items-center gap-2">
+                      <CheckCircle2 className="h-4 w-4" />
+                      Open checkout
+                    </Link>
+                    <button
+                      className="btn-danger inline-flex items-center gap-2"
+                      onClick={() => setSelectedReference(order.session_reference || order.order_reference)}
+                    >
+                      <AlertTriangle className="h-4 w-4" />
+                      Select for dispute
+                    </button>
+                  </>
+                }
+              />
+            ))}
+            
+            {hasMore ? (
+              <button
+                className="btn-secondary w-full py-4 text-stone-700"
+                onClick={() => setPage((prev) => prev + 1)}
+                disabled={ordersQuery.isLoading}
+              >
+                {ordersQuery.isLoading ? "Loading more..." : "Load more sessions"}
+              </button>
+            ) : allOrders.length > 0 ? (
+              <p className="py-4 text-center text-sm text-stone-500">You've reached the end of your session history.</p>
+            ) : null}
+          </>
         )}
       </section>
 

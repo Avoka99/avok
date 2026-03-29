@@ -45,6 +45,11 @@ export default function WalletPage() {
     bank_name: ""
   });
 
+  const [transactionPage, setTransactionPage] = useState(0);
+  const transactionLimit = 10;
+  const [allTransactions, setAllTransactions] = useState([]);
+  const [hasMoreTransactions, setHasMoreTransactions] = useState(false);
+
   const balanceQuery = useQuery({
     queryKey: ["wallet-balance"],
     queryFn: async () => {
@@ -54,12 +59,29 @@ export default function WalletPage() {
   });
 
   const transactionsQuery = useQuery({
-    queryKey: ["wallet-transactions"],
+    queryKey: ["wallet-transactions", transactionPage],
     queryFn: async () => {
-      const response = await api.get("/wallet/transactions");
+      const response = await api.get(`/wallet/transactions?skip=${transactionPage * transactionLimit}&limit=${transactionLimit}`);
       return response.data;
     }
   });
+
+  useMemo(() => {
+    if (transactionsQuery.data) {
+      const items = transactionsQuery.data.items || [];
+      if (transactionPage === 0) {
+        setAllTransactions(items);
+      } else {
+        setAllTransactions((prev) => {
+          const newItems = items.filter(
+            (item) => !prev.some((p) => p.reference === item.reference)
+          );
+          return [...prev, ...newItems];
+        });
+      }
+      setHasMoreTransactions(transactionsQuery.data.has_more);
+    }
+  }, [transactionsQuery.data, transactionPage]);
 
   const withdrawMutation = useMutation({
     mutationFn: async (payload) => {
@@ -322,29 +344,43 @@ export default function WalletPage() {
       <section className="card rounded-[28px] p-6">
         <h3 className="text-xl font-bold">Transaction history</h3>
         <div className="mt-4 space-y-3">
-          {transactions.length === 0 ? (
+          {allTransactions.length === 0 && !transactionsQuery.isLoading ? (
             <div className="rounded-[22px] bg-stone-50 p-5 text-sm text-stone-600">
               No transactions yet. Once you test deposit, payment hold, escrow release, refund, or withdrawal, they will appear here.
             </div>
           ) : (
-            transactions.map((transaction) => (
-              <article key={transaction.reference} className="rounded-[22px] bg-stone-50 p-4">
-                <div className="flex flex-wrap items-start justify-between gap-3">
-                  <div>
-                    <p className="font-bold">{transaction.reference}</p>
-                    <p className="mt-1 text-sm text-stone-600">{transaction.description || transaction.type}</p>
-                    <p className="mt-1 text-xs uppercase tracking-[0.18em] text-stone-500">
-                      {String(transaction.type || "").replaceAll("_", " ")} • {String(transaction.status || "").replaceAll("_", " ")}
-                    </p>
+            <>
+              {allTransactions.map((transaction) => (
+                <article key={transaction.reference} className="rounded-[22px] bg-stone-50 p-4">
+                  <div className="flex flex-wrap items-start justify-between gap-3">
+                    <div>
+                      <p className="font-bold">{transaction.reference}</p>
+                      <p className="mt-1 text-sm text-stone-600">{transaction.description || transaction.type}</p>
+                      <p className="mt-1 text-xs uppercase tracking-[0.18em] text-stone-500">
+                        {String(transaction.type || "").replaceAll("_", " ")} • {String(transaction.status || "").replaceAll("_", " ")}
+                      </p>
+                    </div>
+                    <div className="text-right">
+                      <p className="font-bold">{formatGhs(transaction.amount)}</p>
+                      <p className="text-sm text-stone-500">Fee: {formatGhs(transaction.fee || 0)}</p>
+                      <p className="text-sm text-stone-500">Net: {formatGhs(transaction.net_amount || 0)}</p>
+                    </div>
                   </div>
-                  <div className="text-right">
-                    <p className="font-bold">{formatGhs(transaction.amount)}</p>
-                    <p className="text-sm text-stone-500">Fee: {formatGhs(transaction.fee || 0)}</p>
-                    <p className="text-sm text-stone-500">Net: {formatGhs(transaction.net_amount || 0)}</p>
-                  </div>
-                </div>
-              </article>
-            ))
+                </article>
+              ))}
+
+              {hasMoreTransactions ? (
+                <button
+                  className="btn-secondary w-full py-4 text-stone-700"
+                  onClick={() => setTransactionPage((prev) => prev + 1)}
+                  disabled={transactionsQuery.isLoading}
+                >
+                  {transactionsQuery.isLoading ? "Loading more..." : "Load more transactions"}
+                </button>
+              ) : allTransactions.length > 0 ? (
+                <p className="py-4 text-center text-sm text-stone-500">End of transaction history.</p>
+              ) : null}
+            </>
           )}
         </div>
       </section>

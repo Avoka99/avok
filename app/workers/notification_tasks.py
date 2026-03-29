@@ -1,4 +1,5 @@
 import logging
+import asyncio
 from datetime import datetime, timedelta
 
 from app.core.database import get_db_context
@@ -6,6 +7,18 @@ from app.services.notification import NotificationService
 from app.workers.celery_app import celery_app
 
 logger = logging.getLogger(__name__)
+
+
+def _run_async_task(coro):
+    """Run async task with proper event loop handling."""
+    try:
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            loop.create_task(coro)
+        else:
+            loop.run_until_complete(coro)
+    except RuntimeError:
+        asyncio.run(coro)
 
 
 @celery_app.task(bind=True)
@@ -19,11 +32,10 @@ def send_escrow_reminders(self):
             
             notification_service = NotificationService(db)
             
-            # Get orders that are in escrow
             result = await db.execute(
                 select(Order).where(
                     and_(
-                        Order.escrow_status == OrderStatus.PAYMENT_CONFIRMED,
+                        Order.escrow_status.in_([OrderStatus.SHIPPED, OrderStatus.DELIVERED]),
                         Order.escrow_release_date.isnot(None)
                     )
                 )
@@ -36,7 +48,6 @@ def send_escrow_reminders(self):
                 days_remaining = order.days_until_auto_release()
                 
                 if days_remaining is not None:
-                    # Send reminders at specific intervals
                     if days_remaining == settings.escrow_reminder_day_1:
                         await notification_service.send_reminder(order, days_remaining)
                         reminders_sent += 1
@@ -49,8 +60,7 @@ def send_escrow_reminders(self):
             
             logger.info(f"Sent {reminders_sent} escrow reminders")
     
-    import asyncio
-    asyncio.run(_send())
+    _run_async_task(_send())
 
 
 @celery_app.task(bind=True)
@@ -61,7 +71,6 @@ def retry_failed_notifications(self):
             from app.models.notification import Notification, NotificationStatus, NotificationType
             from sqlalchemy import select, and_
             
-            # Get failed notifications to retry
             result = await db.execute(
                 select(Notification).where(
                     and_(
@@ -101,5 +110,4 @@ def retry_failed_notifications(self):
             
             logger.info(f"Retried {retried_count} notifications")
     
-    import asyncio
-    asyncio.run(_retry())
+    _run_async_task(_retry())

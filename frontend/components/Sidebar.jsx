@@ -6,8 +6,8 @@ import { Bell, LayoutDashboard, ShieldAlert, ShoppingBag, Wallet, BadgeCheck, Sh
 import { useAuthStore } from "@/stores/auth-store";
 
 const baseItems = [
-  { href: "/buyer", label: "Payer", icon: ShoppingBag },
-  { href: "/seller", label: "Recipient", icon: LayoutDashboard },
+  { href: "/buyer", label: "My Payments", icon: ShoppingBag },
+  { href: "/seller", label: "My Receipts", icon: LayoutDashboard },
   { href: "/account", label: "Verify Account", icon: BadgeCheck },
   { href: "/wallet", label: "Wallet", icon: Wallet },
   { href: "/notifications", label: "Alerts", icon: Bell }

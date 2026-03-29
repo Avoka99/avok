@@ -60,7 +60,7 @@ def patch_auth_service():
         if user.role == UserRole.SUPER_ADMIN:
             raise ValidationError("Cannot dismiss a Super Admin")
             
-        user.role = UserRole.BUYER
+        user.role = UserRole.USER
         await self.db.commit()
         return user
 """

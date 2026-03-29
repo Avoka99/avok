@@ -7,15 +7,15 @@ from app.models.user import UserRole, UserStatus, KYCStatus
 
 
 class UserBase(BaseModel):
-    email: Optional[EmailStr] = None
+    email: EmailStr = Field(..., description="Email is required for account verification")
     phone_number: str = Field(..., min_length=10, max_length=15)
     full_name: str = Field(..., min_length=2, max_length=255)
-    role: UserRole = UserRole.BUYER
+    role: UserRole = UserRole.USER
 
 
 class UserCreate(UserBase):
     password: str = Field(..., min_length=8)
-    wants_avok_account: bool = False
+    wants_avok_account: bool = True
     
     @field_validator("password")
     @classmethod
@@ -24,6 +24,20 @@ class UserCreate(UserBase):
             raise ValueError("Password must contain at least one digit")
         if not any(c.isupper() for c in v):
             raise ValueError("Password must contain at least one uppercase letter")
+        return v
+    
+    @field_validator("full_name")
+    @classmethod
+    def validate_full_name(cls, v):
+        if not v or len(v.strip()) < 2:
+            raise ValueError("Full name is required")
+        return v.strip()
+    
+    @field_validator("phone_number")
+    @classmethod
+    def validate_phone(cls, v):
+        if not v or len(v) < 10:
+            raise ValueError("Valid phone number is required")
         return v
 
 
@@ -49,6 +63,13 @@ class UserResponse(UserBase):
     created_at: datetime
 
 
+class UserMeResponse(UserResponse):
+    """Full user response for authenticated user."""
+    last_login_at: Optional[datetime] = None
+    fraud_score: Optional[int] = None
+    is_flagged: bool = False
+
+
 class Token(BaseModel):
     access_token: str
     refresh_token: str
@@ -70,9 +91,10 @@ class PhoneVerificationSend(BaseModel):
 
 
 class KYCSubmission(BaseModel):
-    document_type: str
-    document_number: str
-    document_image: str  # Base64 or S3 URL
-    selfie_image: str  # Base64 or S3 URL
+    document_type: str = Field(..., description="ID type: ghana_card, voter_id, driver_license, national_id")
+    document_number: str = Field(..., min_length=5, description="ID document number")
+    document_image: str = Field(..., description="Base64 or S3 URL of ID document")
+    selfie_image: str = Field(..., description="Base64 or S3 URL of selfie")
+
 class AdminRoleRequest(BaseModel):
     phone_number: str

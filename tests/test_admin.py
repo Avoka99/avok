@@ -21,14 +21,14 @@ async def test_admin_dispute_queue_returns_real_dispute_data(db_session):
         phone_number="0241234000",
         hashed_password="hash",
         full_name="Payer",
-        role=UserRole.BUYER,
+        role=UserRole.USER,
         status=UserStatus.ACTIVE,
     )
     recipient = User(
         phone_number="0247654000",
         hashed_password="hash",
         full_name="Recipient",
-        role=UserRole.SELLER,
+        role=UserRole.USER,
         status=UserStatus.ACTIVE,
     )
     db_session.add_all([admin, payer, recipient])

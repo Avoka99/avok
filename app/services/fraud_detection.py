@@ -4,11 +4,14 @@ from datetime import datetime, timedelta
 
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, and_, func
+from sqlalchemy.sql import or_
 
 from app.models.user import KYCStatus, User
 from app.models.order import Order, OrderStatus
 from app.models.dispute import Dispute, DisputeStatus
 from app.models.transaction import Transaction
+from app.core.config import settings
+from app.core.exceptions import NotFoundError
 
 logger = logging.getLogger(__name__)
 
@@ -24,48 +27,51 @@ class FraudDetectionService:
         fraud_score = 0
         flags = []
         
-        # Check buyer's dispute history
         buyer_disputes = await self._count_user_disputes(dispute.buyer_id)
-        if buyer_disputes > 3:
+        if buyer_disputes > settings.fraud_max_dispute_count:
             fraud_score += 30
             flags.append("High dispute rate as buyer")
         
-        # Check seller's dispute history
-        seller_disputes = await self._count_user_disputes(dispute.seller_id)
-        if seller_disputes > 3:
-            fraud_score += 30
-            flags.append("High dispute rate as seller")
+        if dispute.seller_id is not None:
+            seller_disputes = await self._count_user_disputes(dispute.seller_id)
+            if seller_disputes > settings.fraud_max_dispute_count:
+                fraud_score += 30
+                flags.append("High dispute rate as seller")
+        else:
+            fraud_score += 5
+            flags.append("External recipient dispute")
         
-        # Check order amount
         order = await self._get_order(dispute.order_id)
-        if order.total_amount > 1000:  # High-value order
+        if order.total_amount > settings.fraud_high_value_threshold:
             fraud_score += 10
             flags.append("High-value order")
         
-        # Check if buyer has recent disputes
         recent_disputes = await self._count_recent_disputes(dispute.buyer_id, days=30)
         if recent_disputes > 2:
             fraud_score += 20
             flags.append("Multiple disputes in last 30 days")
         
-        # Check if seller has received multiple disputes
-        seller_recent = await self._count_recent_disputes(dispute.seller_id, days=30)
-        if seller_recent > 2:
-            fraud_score += 20
-            flags.append("Multiple disputes against seller in last 30 days")
+        if dispute.seller_id is not None:
+            seller_recent = await self._count_recent_disputes(dispute.seller_id, days=30)
+            if seller_recent > 2:
+                fraud_score += 20
+                flags.append("Multiple disputes against seller in last 30 days")
+        elif order.seller_contact:
+            recipient_risk = await self._count_recent_disputes_by_contact(order.seller_contact, days=30)
+            if recipient_risk > 2:
+                fraud_score += 15
+                flags.append("Multiple recent disputes against external recipient contact")
         
-        # Check if order was created recently
         if order.created_at > datetime.utcnow() - timedelta(hours=24):
             fraud_score += 5
             flags.append("Order created less than 24 hours ago")
         
-        # Analyze description for suspicious keywords
         suspicious_keywords = ["scam", "fraud", "fake", "not received", "wrong item"]
         if any(keyword in dispute.description.lower() for keyword in suspicious_keywords):
             fraud_score += 10
             flags.append("Suspicious keywords in description")
         
-        is_fraudulent = fraud_score > 50
+        is_fraudulent = fraud_score > settings.fraud_medium_risk_threshold
         
         return {
             "fraud_score": fraud_score,
@@ -80,37 +86,31 @@ class FraudDetectionService:
         fraud_score = user.fraud_score or 0
         flags = []
         
-        # Check dispute rate
         disputes_count = await self._count_user_disputes(user_id)
-        if disputes_count > 5:
+        if disputes_count > settings.fraud_max_dispute_count + 2:
             fraud_score += 40
             flags.append("Excessive disputes")
         
-        # Check KYC status
         if user.kyc_status != KYCStatus.VERIFIED:
             fraud_score += 20
             flags.append("Unverified KYC")
         
-        # Check order completion rate
         completion_rate = await self._get_completion_rate(user_id)
-        if completion_rate < 0.5:  # Less than 50% completion
+        if completion_rate < settings.fraud_completion_rate_threshold:
             fraud_score += 30
             flags.append("Low order completion rate")
         
-        # Check account age
         account_age = (datetime.utcnow() - user.created_at).days
-        if account_age < 7 and disputes_count > 0:
+        if account_age < settings.fraud_new_account_days and disputes_count > 0:
             fraud_score += 25
             flags.append("New account with disputes")
         
-        # Check if flagged by admins
         if user.is_flagged:
             fraud_score += 50
             flags.append("Admin flagged")
         
-        # Update user fraud score
         user.fraud_score = fraud_score
-        if fraud_score >= 70 and not user.is_flagged:
+        if fraud_score >= settings.fraud_auto_flag_threshold and not user.is_flagged:
             user.is_flagged = True
             logger.warning(f"User {user_id} flagged for fraud with score {fraud_score}")
         
@@ -147,6 +147,23 @@ class FraudDetectionService:
                 or_(
                     Dispute.buyer_id == user_id,
                     Dispute.seller_id == user_id
+                )
+            )
+        )
+        return result.scalar() or 0
+
+    async def _count_recent_disputes_by_contact(self, recipient_contact: str, days: int) -> int:
+        """Count recent disputes involving an external recipient contact."""
+        cutoff = datetime.utcnow() - timedelta(days=days)
+        result = await self.db.execute(
+            select(func.count())
+            .select_from(Dispute)
+            .join(Order, Order.id == Dispute.order_id)
+            .where(
+                and_(
+                    Order.seller_id.is_(None),
+                    Order.seller_contact == recipient_contact,
+                    Dispute.created_at >= cutoff,
                 )
             )
         )
@@ -222,9 +239,4 @@ class FraudDetectionService:
     
     async def _notify_admins_fraud_flag(self, user_id: int, reason: str):
         """Notify admins about flagged user."""
-        # In production, send to admin notification queue
         pass
-
-
-# Import for OR
-from sqlalchemy.sql import or_

@@ -1,11 +1,25 @@
 import logging
+import asyncio
 from datetime import datetime, timedelta
 
 from app.core.database import get_db_context
 from app.services.fraud_detection import FraudDetectionService
 from app.workers.celery_app import celery_app
+from app.core.config import settings
 
 logger = logging.getLogger(__name__)
+
+
+def _run_async_task(coro):
+    """Run async task with proper event loop handling."""
+    try:
+        loop = asyncio.get_event_loop()
+        if loop.is_running():
+            loop.create_task(coro)
+        else:
+            loop.run_until_complete(coro)
+    except RuntimeError:
+        asyncio.run(coro)
 
 
 @celery_app.task(bind=True)
@@ -18,12 +32,11 @@ def scan_for_fraud(self):
             
             fraud_service = FraudDetectionService(db)
             
-            # Get active users to scan
             result = await db.execute(
                 select(User).where(
                     and_(
                         User.status == UserStatus.ACTIVE,
-                        User.fraud_score < 80  # Not already heavily flagged
+                        User.fraud_score < settings.fraud_auto_flag_threshold
                     )
                 ).limit(500)
             )
@@ -39,8 +52,7 @@ def scan_for_fraud(self):
             
             logger.info(f"Fraud scan completed. Flagged {flagged_users} new users.")
     
-    import asyncio
-    asyncio.run(_scan())
+    _run_async_task(_scan())
 
 
 @celery_app.task(bind=True)
@@ -53,10 +65,8 @@ def analyze_suspicious_activity(self):
             from app.models.wallet import Wallet
             from sqlalchemy import select, func, and_
             
-            # Find rapid transactions
             cutoff = datetime.utcnow() - timedelta(hours=1)
             
-            # Count transactions per user in last hour
             result = await db.execute(
                 select(
                     Transaction.wallet_id,
@@ -73,7 +83,6 @@ def analyze_suspicious_activity(self):
             high_volume = result.all()
             
             for wallet_id, count in high_volume:
-                # Get user for this wallet
                 user_result = await db.execute(
                     select(User).join(Wallet).where(Wallet.id == wallet_id)
                 )
@@ -82,11 +91,9 @@ def analyze_suspicious_activity(self):
                 if user:
                     logger.warning(f"High transaction volume detected for user {user.id}: {count} in last hour")
                     
-                    # Flag user if not already flagged
                     if not user.is_flagged and count > 20:
                         user.is_flagged = True
                         await db.commit()
                         logger.warning(f"User {user.id} flagged for high transaction volume")
     
-    import asyncio
-    asyncio.run(_analyze())
+    _run_async_task(_analyze())

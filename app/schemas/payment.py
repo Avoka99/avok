@@ -18,7 +18,7 @@ class FundingSource(str, Enum):
 class PaymentInitiate(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
-    session_reference: str = Field(validation_alias=AliasChoices("session_reference", "order_reference"))
+    session_reference: Optional[str] = Field(default=None, validation_alias=AliasChoices("session_reference", "order_reference"))
     funding_source: FundingSource = FundingSource.VERIFIED_ACCOUNT
     payout_destination: FundingSource = FundingSource.VERIFIED_ACCOUNT
     momo_provider: Optional[MobileMoneyProvider] = None

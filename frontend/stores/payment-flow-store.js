@@ -14,9 +14,11 @@ export const usePaymentFlowStore = create(
         payout_reference: "",
         payout_account_name: "",
         payout_bank_name: "",
+        merchant_intent_reference: "",
         product_name: "",
         product_description: "",
         product_price: "",
+        items: [],
         delivery_method: "pickup",
         shipping_address: "",
         product_url: "",
@@ -25,7 +27,20 @@ export const usePaymentFlowStore = create(
         return_url: "",
         cancel_url: ""
       },
-      setDraftOrder: (draftOrder) => set({ draftOrder }),
+      setDraftOrder: (draftOrder) =>
+        set((state) => {
+          const newItems = Array.isArray(draftOrder?.items) ? draftOrder.items : state.draftOrder.items;
+          // Security/Performance: cap items to avoid localStorage explosion
+          const cappedItems = newItems.slice(0, 50);
+          
+          return {
+            draftOrder: {
+              ...state.draftOrder,
+              ...draftOrder,
+              items: cappedItems
+            }
+          };
+        }),
       clearDraftOrder: () =>
         set({
           draftOrder: {
@@ -36,9 +51,11 @@ export const usePaymentFlowStore = create(
             payout_reference: "",
             payout_account_name: "",
             payout_bank_name: "",
+            merchant_intent_reference: "",
             product_name: "",
             product_description: "",
             product_price: "",
+            items: [],
             delivery_method: "pickup",
             shipping_address: "",
             product_url: "",

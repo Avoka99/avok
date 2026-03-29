@@ -16,6 +16,7 @@ from app.core.exceptions import ValidationError, UnauthorizedError, NotFoundErro
 from app.models.user import User, UserStatus, KYCStatus, UserRole
 from app.models.wallet import Wallet, WalletType
 from app.schemas.user import UserCreate
+from app.services.guest_checkout import GuestCheckoutService
 from app.services.notification import NotificationService
 from app.core.config import settings
 
@@ -71,6 +72,8 @@ class AuthService:
         )
         
         self.db.add(main_wallet)
+        guest_checkout_service = GuestCheckoutService(self.db)
+        await guest_checkout_service.convert_sessions_to_user(user.phone_number, user.id)
         await self.db.commit()
         
         # Send verification SMS
@@ -129,7 +132,10 @@ class AuthService:
         await self._store_otp(phone_number, otp)
         
         # Send SMS
-        message = f"Your Avok verification code is: {otp}. Valid for 10 minutes."
+        message = (
+            f"Your Avok verification code is: {otp}. Valid for 10 minutes. "
+            f"Phone verification unlocks checkout up to GHS {settings.fraud_high_value_threshold:,.0f} without full KYC."
+        )
         await self.notification_service.send_sms(phone_number, message)
         
         logger.info(f"Verification code sent to {phone_number}")
@@ -225,7 +231,12 @@ class AuthService:
             if user.status == UserStatus.PENDING and user.is_phone_verified:
                 user.status = UserStatus.ACTIVE
             
-            await self.notification_service.send_kyc_approved(user.phone_number)
+            await self.notification_service.send_sms(
+                user.phone_number,
+                (
+                    "KYC approved. You can now use your Avok balance directly and clear higher-value checkout reviews faster."
+                ),
+            )
             logger.info(f"KYC completely approved for user {user_id} by {len(set(approvals))} admins.")
         else:
             logger.info(f"KYC partially approved for user {user_id} by admin {admin_id}. Needs {required_approvals}")
@@ -349,6 +360,6 @@ class AuthService:
         if user.role == UserRole.SUPER_ADMIN:
             raise ValidationError("Cannot dismiss a Super Admin")
             
-        user.role = UserRole.BUYER
+        user.role = UserRole.USER
         await self.db.commit()
         return user

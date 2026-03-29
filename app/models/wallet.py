@@ -1,5 +1,5 @@
 from datetime import datetime
-from sqlalchemy import Column, Integer, Float, DateTime, ForeignKey, String, Enum, Index
+from sqlalchemy import Column, Integer, Float, DateTime, ForeignKey, String, Enum, Index, CheckConstraint
 from sqlalchemy.orm import relationship
 from sqlalchemy.ext.hybrid import hybrid_property
 import enum
@@ -16,6 +16,11 @@ class WalletType(str, enum.Enum):
 class Wallet(Base):
     """User wallet model."""
     __tablename__ = "wallets"
+    __table_args__ = (
+        CheckConstraint('available_balance >= 0', name='check_positive_available_balance'),
+        CheckConstraint('pending_balance >= 0', name='check_positive_pending_balance'),
+        CheckConstraint('escrow_balance >= 0', name='check_positive_escrow_balance'),
+    )
     
     id = Column(Integer, primary_key=True, index=True)
     user_id = Column(Integer, ForeignKey("users.id", ondelete="CASCADE"), unique=True, nullable=False)

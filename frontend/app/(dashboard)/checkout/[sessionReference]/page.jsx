@@ -40,6 +40,16 @@ function formatDestination(value) {
   return String(value).replaceAll("_", " ");
 }
 
+function formatViewerRole(role) {
+  if (role === "recipient") {
+    return "recipient";
+  }
+  if (role === "admin") {
+    return "admin monitor";
+  }
+  return "payer";
+}
+
 export default function CheckoutDetailPage() {
   const queryClient = useQueryClient();
   const params = useParams();
@@ -62,10 +72,7 @@ export default function CheckoutDetailPage() {
 
   const paymentMutation = useMutation({
     mutationFn: async (payload) => {
-      const response = await api.post("/payments/initiate", {
-        session_reference: orderReference,
-        ...payload
-      });
+      const response = await api.post(`/checkout/sessions/${orderReference}/fund`, payload);
       return response.data;
     },
     onSuccess: async () => {
@@ -164,6 +171,12 @@ export default function CheckoutDetailPage() {
   const recipientNet = Number(order.product_price || 0) - releaseFee;
   const heldAmount = Number(order.product_price || 0) + entryFee;
   const payoutDestination = order.payout_destination || paymentForm.payout_destination;
+  const actorLabel = formatViewerRole(order.viewer_role);
+  const canFund = Boolean(order.can_fund);
+  const canConfirmDelivery = Boolean(order.can_confirm_delivery);
+  const canGenerateDeliveryOtp = Boolean(order.can_generate_delivery_otp);
+  const canSubmitDeliveryOtp = Boolean(order.can_submit_delivery_otp);
+  const isReadOnlyMonitor = Boolean(order.is_read_only_monitor);
 
   const timeline = useMemo(
     () => [
@@ -202,6 +215,14 @@ export default function CheckoutDetailPage() {
           </div>
           <EscrowStatusBadge status={order.escrow_status} />
         </div>
+        <div className="mt-5 rounded-[22px] bg-stone-50 p-4 text-sm leading-6 text-stone-700">
+          <span className="font-semibold">Your view:</span> You are currently monitoring this checkout session as the {actorLabel}. Both sides can watch the funds move, but Avok only shows actions that match your role in this transaction.
+        </div>
+        {isReadOnlyMonitor ? (
+          <div className="mt-4 rounded-[22px] bg-amber-50 p-4 text-sm leading-6 text-amber-900">
+            This is a read-only monitoring view right now. You can track escrow status, held funds, and delivery progress here, but there is no action required from your side at the current stage.
+          </div>
+        ) : null}
       </section>
 
       <section className="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
@@ -269,54 +290,64 @@ export default function CheckoutDetailPage() {
 
           <div className="card rounded-[28px] p-6">
             <h3 className="text-xl font-bold">Checkout and sandbox payment</h3>
-            <p className="mt-2 text-sm text-stone-600">
-              Initiate the payment path, then use the sandbox buttons to simulate whether the money was successfully moved into escrow.
-            </p>
-            <form
-              className="mt-5 space-y-4"
-              onSubmit={(event) => {
-                event.preventDefault();
-                paymentMutation.mutate(paymentForm);
-              }}
-            >
-              <select className="field" value={paymentForm.momo_provider} onChange={(event) => setPaymentForm((prev) => ({ ...prev, momo_provider: event.target.value }))}>
-                <option value="mtn">MTN</option>
-                <option value="telecel">Telecel</option>
-                <option value="airtel_tigo">AirtelTigo</option>
-              </select>
-              <input className="field" value={paymentForm.momo_number} onChange={(event) => setPaymentForm((prev) => ({ ...prev, momo_number: event.target.value }))} placeholder="0241111111" />
-              <select className="field" value={paymentForm.funding_source} onChange={(event) => setPaymentForm((prev) => ({ ...prev, funding_source: event.target.value }))}>
-                <option value="verified_account">Pay from Avok verified account</option>
-                <option value="momo">Pay from MoMo directly into escrow</option>
-                <option value="bank">Pay from bank directly into escrow</option>
-              </select>
-              <select className="field" value={paymentForm.payout_destination} onChange={(event) => setPaymentForm((prev) => ({ ...prev, payout_destination: event.target.value }))}>
-                <option value="verified_account">Release to Avok verified account</option>
-                <option value="momo">Release to MoMo directly</option>
-                <option value="bank">Release to bank directly</option>
-              </select>
-              <button className="btn-primary w-full" type="submit">
-                {paymentMutation.isPending ? "Starting payment..." : "Initiate payment"}
-              </button>
-            </form>
+            {canFund ? (
+              <>
+                <p className="mt-2 text-sm text-stone-600">
+                  Initiate the payment path, then use the sandbox buttons to simulate whether the money was successfully moved into escrow.
+                </p>
+                <form
+                  className="mt-5 space-y-4"
+                  onSubmit={(event) => {
+                    event.preventDefault();
+                    paymentMutation.mutate(paymentForm);
+                  }}
+                >
+                  <select className="field" value={paymentForm.momo_provider} onChange={(event) => setPaymentForm((prev) => ({ ...prev, momo_provider: event.target.value }))}>
+                    <option value="mtn">MTN</option>
+                    <option value="telecel">Telecel</option>
+                    <option value="airtel_tigo">AirtelTigo</option>
+                  </select>
+                  <input className="field" value={paymentForm.momo_number} onChange={(event) => setPaymentForm((prev) => ({ ...prev, momo_number: event.target.value }))} placeholder="0241111111" />
+                  <select className="field" value={paymentForm.funding_source} onChange={(event) => setPaymentForm((prev) => ({ ...prev, funding_source: event.target.value }))}>
+                    <option value="verified_account">Pay from Avok verified account</option>
+                    <option value="momo">Pay from MoMo directly into escrow</option>
+                    <option value="bank">Pay from bank directly into escrow</option>
+                  </select>
+                  <select className="field" value={paymentForm.payout_destination} onChange={(event) => setPaymentForm((prev) => ({ ...prev, payout_destination: event.target.value }))}>
+                    <option value="verified_account">Release to Avok verified account</option>
+                    <option value="momo">Release to MoMo directly</option>
+                    <option value="bank">Release to bank directly</option>
+                  </select>
+                  <button className="btn-primary w-full" type="submit">
+                    {paymentMutation.isPending ? "Starting payment..." : "Initiate payment"}
+                  </button>
+                </form>
 
-            {paymentMutation.data ? (
-              <div className="mt-4 space-y-3">
-                <div className="rounded-[22px] bg-stone-950 p-4 text-xs text-emerald-200">
-                  <pre className="overflow-auto whitespace-pre-wrap">{JSON.stringify(paymentMutation.data, null, 2)}</pre>
-                </div>
-                <div className="flex flex-wrap gap-3">
-                  <button className="btn-primary" onClick={() => sandboxSuccessMutation.mutate(paymentMutation.data.transaction_reference)} type="button">
-                    Mark payment successful
-                  </button>
-                  <button className="btn-danger" onClick={() => sandboxFailMutation.mutate(paymentMutation.data.transaction_reference)} type="button">
-                    Mark payment failed
-                  </button>
-                </div>
+                {paymentMutation.data ? (
+                  <div className="mt-4 space-y-3">
+                    <div className="rounded-[22px] bg-stone-950 p-4 text-xs text-emerald-200">
+                      <pre className="overflow-auto whitespace-pre-wrap">{JSON.stringify(paymentMutation.data, null, 2)}</pre>
+                    </div>
+                    <div className="flex flex-wrap gap-3">
+                      <button className="btn-primary" onClick={() => sandboxSuccessMutation.mutate(paymentMutation.data.transaction_reference)} type="button">
+                        Mark payment successful
+                      </button>
+                      <button className="btn-danger" onClick={() => sandboxFailMutation.mutate(paymentMutation.data.transaction_reference)} type="button">
+                        Mark payment failed
+                      </button>
+                    </div>
+                  </div>
+                ) : null}
+
+                {sandboxSuccessMutation.data ? <p className="mt-4 rounded-2xl bg-emerald-50 px-4 py-3 text-sm font-medium text-emerald-700">Payment moved into escrow successfully.</p> : null}
+              </>
+            ) : (
+              <div className="mt-4 rounded-[22px] bg-stone-50 p-4 text-sm leading-6 text-stone-700">
+                {order.escrow_status === "pending_payment"
+                  ? "Only the payer can move money into escrow. You can still monitor the checkout details and wait for funding."
+                  : "Funding is no longer available on this checkout session. This panel stays visible so both sides can understand how the escrow amount was calculated."}
               </div>
-            ) : null}
-
-            {sandboxSuccessMutation.data ? <p className="mt-4 rounded-2xl bg-emerald-50 px-4 py-3 text-sm font-medium text-emerald-700">Payment moved into escrow successfully.</p> : null}
+            )}
             <div className="mt-4 rounded-[22px] bg-stone-50 p-4 text-sm leading-6 text-stone-700">
               <span className="font-semibold">Rule preview:</span>{" "}
               {paymentForm.funding_source === "verified_account"
@@ -333,14 +364,16 @@ export default function CheckoutDetailPage() {
           <div className="card rounded-[28px] p-6">
             <h3 className="text-xl font-bold">Delivery confirmation</h3>
             <div className="mt-4 flex flex-wrap gap-3">
-              {order.recipient_id || order.seller_id ? (
+              {canGenerateDeliveryOtp ? (
                 <button className="btn-secondary" type="button" onClick={() => recipientOtpMutation.mutate()}>
                   Recipient generate OTP
                 </button>
               ) : null}
-              <button className="btn-primary" type="button" onClick={() => payerConfirmMutation.mutate()}>
-                Payer confirm delivery
-              </button>
+              {canConfirmDelivery ? (
+                <button className="btn-primary" type="button" onClick={() => payerConfirmMutation.mutate()}>
+                  Payer confirm delivery
+                </button>
+              ) : null}
             </div>
             {recipientOtpMutation.data ? (
               <div className="mt-4 rounded-[22px] bg-amber-50 p-4 text-sm text-amber-900">
@@ -348,7 +381,7 @@ export default function CheckoutDetailPage() {
                 <p className="mt-1 text-lg font-bold tracking-[0.2em]">{recipientOtpMutation.data.otp}</p>
               </div>
             ) : null}
-            {order.recipient_id || order.seller_id ? (
+            {canSubmitDeliveryOtp ? (
               <>
                 <div className="mt-5">
                   <OTPInput value={otp} onChange={setOtp} label="Recipient submits OTP after handover" />
@@ -357,6 +390,12 @@ export default function CheckoutDetailPage() {
                   Confirm delivery with OTP
                 </button>
               </>
+            ) : order.recipient_id || order.seller_id ? (
+              <div className="mt-5 rounded-[22px] bg-stone-50 p-4 text-sm leading-6 text-stone-700">
+                {canConfirmDelivery
+                  ? "Only the registered recipient can generate and submit the delivery OTP. You can release the escrow after handover by using payer confirmation."
+                  : "OTP actions appear only for the registered recipient at the right stage of delivery. You can still monitor the escrow timeline here."}
+              </div>
             ) : (
               <div className="mt-5 rounded-[22px] bg-stone-50 p-4 text-sm leading-6 text-stone-700">
                 This checkout session pays an external recipient. Payer confirmation is the primary release path here unless a dispute is opened.
