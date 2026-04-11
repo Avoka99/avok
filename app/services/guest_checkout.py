@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta
+from datetime import datetime, timezone, timedelta
 from typing import Optional
 
 from sqlalchemy import select
@@ -21,7 +21,7 @@ class GuestCheckoutService:
             phone_number=phone_number,
             full_name=full_name,
             email=email,
-            expires_at=datetime.utcnow() + self.REFRESH_TOKEN_TTL,
+            expires_at=datetime.now(timezone.utc) + self.REFRESH_TOKEN_TTL,
         )
         self.db.add(guest_session)
         await self.db.flush()

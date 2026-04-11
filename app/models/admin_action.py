@@ -1,5 +1,5 @@
 from datetime import datetime
-from sqlalchemy import Column, Integer, String, Text, DateTime, ForeignKey, Enum, JSON, Index
+from sqlalchemy import func, Column, Integer, String, Text, DateTime, ForeignKey, Enum, JSON, Index
 from sqlalchemy.orm import relationship
 import enum
 
@@ -52,12 +52,12 @@ class AdminAction(Base):
     
     # Execution
     executed_by_id = Column(Integer, ForeignKey("users.id"), nullable=True)
-    executed_at = Column(DateTime, nullable=True)
+    executed_at = Column(DateTime(timezone=True), nullable=True)
     execution_result = Column(JSON, nullable=True)
     
     # Timestamps
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
     
     # Relationships
     requested_by = relationship("User", foreign_keys=[requested_by_id])
@@ -71,10 +71,6 @@ class AdminAction(Base):
         Index("ix_admin_actions_status", "status"),
         Index("ix_admin_actions_type", "action_type"),
     )
-    
-    def can_execute(self) -> bool:
-        """Check if action has enough approvals to execute."""
-        return self.approvals_received >= self.approvals_required
     
     def __repr__(self):
         return f"<AdminAction {self.action_reference}: {self.action_type} - {self.status}>"

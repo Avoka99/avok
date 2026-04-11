@@ -13,10 +13,17 @@ class PaymentSecurityRequirements(TypedDict):
 
 
 def calculate_capped_fee(amount: float, percent: float = 1.0, cap_amount: float = 30.0) -> float:
-    """Calculate a percentage fee with an upper cap."""
+    """Calculate a percentage fee with a tiered upper cap."""
     numeric_amount = max(float(amount or 0), 0.0)
     fee = numeric_amount * (percent / 100)
-    return min(fee, cap_amount)
+    effective_cap = float(cap_amount or 0.0)
+    if numeric_amount >= 1_000_000:
+        effective_cap = max(effective_cap, 500.0)
+    elif numeric_amount >= 100_000:
+        effective_cap = max(effective_cap, 100.0)
+    elif numeric_amount >= 10_000:
+        effective_cap = max(effective_cap, 50.0)
+    return min(fee, effective_cap)
 
 
 def is_verified_account(user: User) -> bool:

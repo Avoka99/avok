@@ -9,15 +9,13 @@ import { useAuthStore } from "@/stores/auth-store";
 export default function AdminDashboardPage() {
   const user = useAuthStore(state => state.user);
   const queryClient = useQueryClient();
-
-  if (!user || (user.role !== 'admin' && user.role !== 'super_admin' && !user.is_superuser)) {
-      return <div className="p-10 text-center text-rose-600 font-bold">Unauthorized: This area requires elevated privileges.</div>;
-  }
+  const canAccess = Boolean(user && (user.role === "admin" || user.role === "super_admin" || user.is_superuser));
 
   const [selectedDisputeId, setSelectedDisputeId] = useState(null);
 
   const disputesQuery = useQuery({
     queryKey: ["admin-dispute-queue"],
+    enabled: canAccess,
     queryFn: async () => {
       const response = await api.get("/admin/disputes/queue");
       return response.data;
@@ -26,6 +24,7 @@ export default function AdminDashboardPage() {
 
   const actionsQuery = useQuery({
     queryKey: ["admin-actions"],
+    enabled: canAccess,
     queryFn: async () => {
       const response = await api.get("/admin/actions");
       return response.data;
@@ -77,6 +76,10 @@ export default function AdminDashboardPage() {
     ? actionsQuery.data.filter((action) => action.status === "pending")
     : [];
   const recentActions = Array.isArray(actionsQuery.data) ? actionsQuery.data.slice(0, 5) : [];
+
+  if (!canAccess) {
+    return <div className="p-10 text-center text-rose-600 font-bold">Unauthorized: This area requires elevated privileges.</div>;
+  }
 
   return (
     <div className="space-y-5">

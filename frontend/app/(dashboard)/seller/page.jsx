@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import Link from "next/link";
 import { useQuery } from "@tanstack/react-query";
 import { Truck, Wallet } from "lucide-react";
@@ -23,7 +23,7 @@ export default function SellerDashboardPage() {
     }
   });
 
-  useMemo(() => {
+  useEffect(() => {
     if (ordersQuery.data) {
       const items = ordersQuery.data.items || [];
       if (page === 0) {

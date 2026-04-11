@@ -2,6 +2,7 @@ import pytest
 from sqlalchemy import select
 
 from app.models.admin_action import AdminActionStatus
+from app.models.notification import Notification, NotificationType
 from app.models.order import DeliveryMethod, Order, OrderStatus
 from app.models.wallet import Wallet, WalletType
 from app.models.user import User, UserRole, UserStatus
@@ -282,3 +283,68 @@ async def test_external_recipient_dispute_does_not_crash_fraud_analysis(db_sessi
 
     assert dispute.seller_id is None
     assert "External recipient dispute" in analysis["flags"]
+
+
+@pytest.mark.asyncio
+async def test_create_dispute_notifies_active_admins(db_session):
+    buyer = User(phone_number="0241234111", hashed_password="hash", full_name="Buyer", role=UserRole.USER, status=UserStatus.ACTIVE)
+    seller = User(phone_number="0247654111", hashed_password="hash", full_name="Seller", role=UserRole.USER, status=UserStatus.ACTIVE)
+    admin = User(phone_number="0240001111", hashed_password="hash", full_name="Admin", role=UserRole.ADMIN, status=UserStatus.ACTIVE)
+    db_session.add_all([buyer, seller, admin])
+    await db_session.commit()
+
+    order = Order(
+        order_reference="AVOK-DSP-NOTIFY",
+        buyer_id=buyer.id,
+        seller_id=seller.id,
+        product_name="Machine",
+        product_price=100.0,
+        platform_fee=1.0,
+        total_amount=101.0,
+        escrow_status=OrderStatus.PAYMENT_CONFIRMED,
+        delivery_method=DeliveryMethod.PICKUP,
+    )
+    db_session.add(order)
+    await db_session.commit()
+
+    dispute_service = DisputeService(db_session)
+    dispute = await dispute_service.create_dispute(
+        order_reference=order.order_reference,
+        buyer_id=buyer.id,
+        dispute_type=DisputeType.ITEM_NOT_RECEIVED,
+        description="Admin notification should be created for this dispute."
+    )
+
+    result = await db_session.execute(
+        select(Notification).where(
+            Notification.user_id == admin.id,
+            Notification.order_reference == order.order_reference,
+            Notification.title == "New dispute requires review",
+        )
+    )
+    notifications = result.scalars().all()
+
+    assert dispute.dispute_reference.startswith("DSP-")
+    assert any(notification.notification_type == NotificationType.IN_APP for notification in notifications)
+
+
+@pytest.mark.asyncio
+async def test_flag_user_notifies_active_admins(db_session):
+    flagged_user = User(phone_number="0241234222", hashed_password="hash", full_name="Flagged User", role=UserRole.USER, status=UserStatus.ACTIVE)
+    admin = User(phone_number="0240002222", hashed_password="hash", full_name="Admin", role=UserRole.ADMIN, status=UserStatus.ACTIVE)
+    db_session.add_all([flagged_user, admin])
+    await db_session.commit()
+
+    fraud_service = FraudDetectionService(db_session)
+    updated_user = await fraud_service.flag_user(flagged_user.id, "too_many_disputes")
+
+    result = await db_session.execute(
+        select(Notification).where(
+            Notification.user_id == admin.id,
+            Notification.title == "Fraud flag requires admin review",
+        )
+    )
+    notifications = result.scalars().all()
+
+    assert updated_user.is_flagged is True
+    assert any(notification.notification_type == NotificationType.IN_APP for notification in notifications)

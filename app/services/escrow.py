@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta
+from datetime import datetime, timezone, timedelta
 from typing import Optional
 import logging
 import uuid
@@ -24,42 +24,68 @@ class EscrowService:
     def __init__(self, db: AsyncSession):
         self.db = db
         self.notification_service = NotificationService(db)
-    
-    async def create_escrow_order(
-        self,
-        buyer_id: int,
-        seller_id: int,
-        product_price: float,
-        order_id: int
-    ) -> Order:
-        """Create escrow order and calculate fees."""
-        platform_fee = product_price * (settings.platform_fee_percent / 100)
-        total_amount = product_price + platform_fee
-        
-        # Get buyer and seller wallets
-        buyer_wallet = await self._get_wallet(buyer_id)
-        seller_wallet = await self._get_wallet(seller_id)
-        
-        # Generate order reference
-        order_reference = f"AVOK-{uuid.uuid4().hex[:8].upper()}"
-        
-        order = Order(
-            order_reference=order_reference,
-            buyer_id=buyer_id,
-            seller_id=seller_id,
-            product_name="Escrow Order",
-            product_price=product_price,
-            platform_fee=platform_fee,
-            total_amount=total_amount,
-            escrow_status=OrderStatus.PENDING_PAYMENT,
-            delivery_method=DeliveryMethod.PICKUP,
+
+    async def _get_refundable_payment_transaction(self, order_id: int) -> Optional[Transaction]:
+        result = await self.db.execute(
+            select(Transaction)
+            .where(
+                Transaction.order_id == order_id,
+                Transaction.transaction_type.in_([TransactionType.ESCROW_HOLD, TransactionType.DEPOSIT]),
+                Transaction.status == TransactionStatus.COMPLETED,
+            )
+            .order_by(Transaction.created_at.desc())
         )
-        
-        self.db.add(order)
-        await self.db.flush()
-        
-        logger.info(f"Escrow order created: {order_reference} for {total_amount} GHS")
-        return order
+        return result.scalars().first()
+
+    def _resolve_refund_destination(
+        self,
+        order: Order,
+        payment_transaction: Optional[Transaction],
+    ) -> Optional[dict]:
+        if payment_transaction and payment_transaction.extra_data:
+            refund_destination = payment_transaction.extra_data.get("refund_destination")
+            if refund_destination:
+                return refund_destination
+
+        payout_metadata = order.payout_metadata or {}
+        refund_destination = payout_metadata.get("refund_destination")
+        if refund_destination:
+            return refund_destination
+
+        if order.payment_source == "momo" and payment_transaction and payment_transaction.momo_number:
+            return {
+                "destination_type": "momo",
+                "destination_reference": payment_transaction.momo_number,
+                "provider": payment_transaction.momo_provider,
+                "charge_fee": False,
+            }
+        if order.payment_source == "bank" and payment_transaction and payment_transaction.extra_data:
+            bank_reference = payment_transaction.extra_data.get("bank_reference")
+            if bank_reference:
+                return {
+                    "destination_type": "bank",
+                    "destination_reference": bank_reference,
+                    "provider": "bank",
+                    "charge_fee": False,
+                }
+        return None
+
+    async def _refund_to_original_source(self, amount: float, destination: dict, reference: str) -> dict:
+        from app.services.wallet import WalletService
+
+        wallet_service = WalletService(self.db)
+        payout_result = await wallet_service.process_external_payout(
+            amount=amount,
+            destination_type=destination["destination_type"],
+            destination_reference=destination["destination_reference"],
+            reference=reference,
+            momo_provider=destination.get("provider"),
+        )
+        if not payout_result.get("success"):
+            raise EscrowError(
+                payout_result.get("error_message", "Refund to the original payment source could not be started")
+            )
+        return payout_result
     
     async def hold_funds_in_escrow(
         self,
@@ -123,7 +149,7 @@ class EscrowService:
         
         # Update order status
         order.escrow_status = OrderStatus.PAYMENT_CONFIRMED
-        order.escrow_held_at = datetime.utcnow()
+        order.escrow_held_at = datetime.now(timezone.utc)
         order.escrow_release_date = None
         order.payment_source = payment_source
         order.entry_fee = fee_amount
@@ -132,18 +158,6 @@ class EscrowService:
         await self.db.commit()
         
         logger.info(f"Funds held in escrow for order {order.order_reference}: {order.total_amount} GHS")
-        
-        # Schedule auto-release using Celery send_task to avoid circular import
-        try:
-            from celery import current_app
-            current_app.send_task(
-                'app.workers.escrow_tasks.schedule_escrow_release',
-                args=[order.id],
-                eta=order.escrow_release_date
-            )
-            logger.info(f"Scheduled auto-release for order {order.order_reference}")
-        except Exception as e:
-            logger.warning(f"Failed to schedule auto-release: {e}")
         
         # Notification removed to prevent duplicates
         
@@ -228,10 +242,10 @@ class EscrowService:
         
         # Update order
         order.escrow_status = OrderStatus.COMPLETED
-        order.completed_at = datetime.utcnow()
+        order.completed_at = datetime.now(timezone.utc)
         order.release_fee = release_fee
         order.escrow_account_active = False
-        order.escrow_closed_at = datetime.utcnow()
+        order.escrow_closed_at = datetime.now(timezone.utc)
         
         await self.db.commit()
         
@@ -273,6 +287,28 @@ class EscrowService:
         )
         if existing_refund.scalar_one_or_none():
             raise EscrowError("Refund already exists for this checkout session")
+
+        payment_transaction = await self._get_refundable_payment_transaction(order.id)
+        refund_destination = self._resolve_refund_destination(order, payment_transaction)
+        refund_extra_data = {
+            "reason": reason,
+            "payment_source": order.payment_source,
+            "refund_destination": refund_destination,
+            "charged_fee": False,
+            "refund_to_original_source": bool(refund_destination),
+        }
+
+        refund_reference = f"REF-{order.order_reference}-{uuid.uuid4().hex[:8]}"
+        provider_result = None
+        if not buyer_wallet and order.payment_source in {"momo", "bank"}:
+            if not refund_destination:
+                raise EscrowError("Refund destination for the original payment source is missing")
+            provider_result = await self._refund_to_original_source(
+                amount=order.total_amount,
+                destination=refund_destination,
+                reference=refund_reference,
+            )
+            refund_extra_data["provider_result"] = provider_result
         
         # Create refund transaction
         transaction = Transaction(
@@ -283,8 +319,10 @@ class EscrowService:
             amount=order.total_amount,
             fee_amount=0,
             net_amount=order.total_amount,
-            reference=f"REF-{order.order_reference}-{uuid.uuid4().hex[:8]}",
-            description=f"Refund for checkout session {order.order_reference}: {reason}"
+            reference=refund_reference,
+            description=f"Refund for checkout session {order.order_reference}: {reason}",
+            extra_data=refund_extra_data,
+            completed_at=datetime.now(timezone.utc),
         )
         
         self.db.add(transaction)
@@ -297,7 +335,7 @@ class EscrowService:
         # Update order
         order.escrow_status = OrderStatus.REFUNDED
         order.escrow_account_active = False
-        order.escrow_closed_at = datetime.utcnow()
+        order.escrow_closed_at = datetime.now(timezone.utc)
         
         await self.db.commit()
         
@@ -340,17 +378,16 @@ class EscrowService:
             raise EscrowError("OTP has expired")
         
         otp_record.is_verified = True
-        otp_record.verified_at = datetime.utcnow()
+        otp_record.verified_at = datetime.now(timezone.utc)
         otp_record.verified_by_id = seller_id
         
         order.escrow_status = OrderStatus.DELIVERED
-        order.delivered_at = datetime.utcnow()
+        order.delivered_at = datetime.now(timezone.utc)
         
+        await self.release_funds_to_seller(order.id)
         await self.db.commit()
         
         logger.info(f"Delivery confirmed with OTP for order {order.order_reference}")
-        
-        await self.release_funds_to_seller(order.id)
         
         return True
     

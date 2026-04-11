@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useState, useEffect } from "react";
 import Link from "next/link";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { AlertTriangle, CheckCircle2, PlusCircle } from "lucide-react";
@@ -29,7 +29,7 @@ export default function BuyerDashboardPage() {
   const [evidenceFiles, setEvidenceFiles] = useState([]);
   const [disputeText, setDisputeText] = useState("");
 
-  useMemo(() => {
+  useEffect(() => {
     if (ordersQuery.data) {
       const items = ordersQuery.data.items || [];
       if (page === 0) {

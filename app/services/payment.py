@@ -2,7 +2,7 @@ from typing import Optional, Dict
 import logging
 import uuid
 import httpx
-from datetime import datetime
+from datetime import datetime, timezone
 
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
@@ -19,6 +19,9 @@ from app.services.escrow import EscrowService
 from app.services.notification import NotificationService
 from app.services.fraud_detection import FraudDetectionService
 from app.integrations.mtn_momo_collection import try_mtn_momo_checkout
+from app.integrations.telecel_cash import try_telecel_cash_checkout
+from app.integrations.airteltigo_money import try_airteltigo_checkout
+from app.integrations.bank_collection import try_bank_collection_payment
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +34,30 @@ class PaymentService:
         self.escrow_service = EscrowService(db)
         self.notification_service = NotificationService(db)
         self.fraud_service = FraudDetectionService(db)
+
+    def _build_refund_destination(
+        self,
+        funding_source: str,
+        *,
+        momo_provider: Optional[str],
+        momo_number: Optional[str],
+        bank_reference: Optional[str],
+    ) -> Optional[Dict]:
+        if funding_source == "momo" and momo_number:
+            return {
+                "destination_type": "momo",
+                "destination_reference": momo_number,
+                "provider": momo_provider,
+                "charge_fee": False,
+            }
+        if funding_source == "bank" and bank_reference:
+            return {
+                "destination_type": "bank",
+                "destination_reference": bank_reference,
+                "provider": "bank",
+                "charge_fee": False,
+            }
+        return None
     
     async def initiate_payment(
         self,
@@ -80,6 +107,12 @@ class PaymentService:
             )
 
         gross_amount = order.product_price + entry_fee
+        refund_destination = self._build_refund_destination(
+            funding_source,
+            momo_provider=momo_provider.value if hasattr(momo_provider, "value") else momo_provider,
+            momo_number=momo_number,
+            bank_reference=bank_reference,
+        )
 
         transaction = Transaction(
             wallet_id=None,
@@ -98,6 +131,7 @@ class PaymentService:
                 "payout_destination": payout_destination,
                 "bank_reference": bank_reference,
                 "release_fee": release_fee,
+                "refund_destination": refund_destination,
                 "security_tier": security_requirements["tier"],
                 "requires_phone_verification": security_requirements["requires_phone_verification"],
                 "requires_kyc": security_requirements["requires_kyc"],
@@ -113,6 +147,10 @@ class PaymentService:
         order.release_fee = release_fee
         order.payment_source = funding_source
         order.payout_destination = payout_destination
+        order.payout_metadata = {
+            **(order.payout_metadata or {}),
+            "refund_destination": refund_destination,
+        }
 
         payment_result = {}
         payment_requires_review = False
@@ -127,7 +165,7 @@ class PaymentService:
                 order.payout_metadata["payment_review"] = {
                     "reason": "buyer_flagged",
                     "fraud_score": fraud_check.get("fraud_score", 0),
-                    "flagged_at": datetime.utcnow().isoformat()
+                    "flagged_at": datetime.now(timezone.utc).isoformat()
                 }
                 payment_requires_review = True
             
@@ -149,6 +187,19 @@ class PaymentService:
                 bank_reference=bank_reference,
                 source_type=funding_source,
             )
+            transaction.extra_data = {
+                **(transaction.extra_data or {}),
+                "provider_result": payment_result,
+            }
+            if payment_result.get("status") == "error":
+                transaction.status = TransactionStatus.FAILED
+                await self.db.commit()
+                await self.notification_service.send_payment_failed(transaction.order_id)
+                logger.warning(
+                    "External payment initiation failed for %s and can be retried: %s",
+                    transaction_reference,
+                    payment_result.get("instructions"),
+                )
         
         logger.info(f"Payment initiated for checkout session {order.order_reference}: {transaction_reference}")
         
@@ -168,7 +219,13 @@ class PaymentService:
             "payment_url": payment_result.get("payment_url"),
             "instructions": payment_result.get("instructions"),
             "security_tier": security_requirements["tier"],
-            "status": "completed" if funding_source == "verified_account" else "pending"
+            "status": (
+                "completed"
+                if funding_source == "verified_account"
+                else "failed"
+                if payment_result.get("status") == "error"
+                else "pending"
+            )
         }
     
     async def handle_payment_callback(
@@ -196,13 +253,13 @@ class PaymentService:
                     order.payout_metadata["payment_review"] = {
                         "reason": "buyer_flagged_at_callback",
                         "fraud_score": fraud_check.get("fraud_score", 0),
-                        "flagged_at": datetime.utcnow().isoformat()
+                        "flagged_at": datetime.now(timezone.utc).isoformat()
                     }
             
             transaction.status = TransactionStatus.COMPLETED
             transaction.momo_transaction_id = momo_transaction_id
             transaction.momo_approval_code = approval_code
-            transaction.completed_at = datetime.utcnow()
+            transaction.completed_at = datetime.now(timezone.utc)
             
             await self.escrow_service.hold_funds_in_escrow(
                 transaction.order_id,
@@ -223,6 +280,36 @@ class PaymentService:
             
             order = await self._get_order(transaction.order_id)
             order.escrow_status = OrderStatus.CANCELLED
+            
+            # Refund escrowed funds if payment was from verified account
+            funding_source = transaction.extra_data.get("funding_source", "momo") if transaction.extra_data else "momo"
+            if funding_source == "verified_account":
+                try:
+                    from app.models.wallet import Wallet, WalletType
+                    from app.models.transaction import Transaction as TxnModel, TransactionType
+                    
+                    buyer_wallet_result = await self.db.execute(
+                        select(Wallet).where(
+                            Wallet.user_id == order.buyer_id,
+                            Wallet.wallet_type == WalletType.MAIN
+                        ).with_for_update()
+                    )
+                    buyer_wallet = buyer_wallet_result.scalar_one_or_none()
+                    if buyer_wallet:
+                        buyer_wallet.escrow_balance -= transaction.amount
+                        buyer_wallet.available_balance += transaction.amount
+                        
+                        refund_txn = TxnModel(
+                            wallet_id=buyer_wallet.id,
+                            transaction_type=TransactionType.ESCROW_REFUND,
+                            status=TransactionStatus.COMPLETED,
+                            amount=transaction.amount,
+                            description=f"Escrow refund for failed payment: {transaction_reference}",
+                        )
+                        self.db.add(refund_txn)
+                        logger.info(f"Refunded {transaction.amount} GHS to buyer {order.buyer_id} for failed payment")
+                except Exception as e:
+                    logger.error(f"Failed to refund escrowed funds: {e}")
             
             await self.notification_service.send_payment_failed(transaction.order_id)
             
@@ -249,6 +336,24 @@ class PaymentService:
         # In production, integrate with provider APIs
         
         if source_type == "bank":
+            bank_result = await try_bank_collection_payment(
+                transaction_reference=transaction_reference,
+                amount=amount,
+                email=phone_number,
+                sponsor_bank_api_url=settings.sponsor_bank_api_url,
+                sponsor_bank_api_key=settings.sponsor_bank_api_key,
+                sponsor_bank_api_secret=settings.sponsor_bank_api_secret,
+                avok_virtual_account=settings.avok_virtual_account,
+                collection_method=settings.bank_collection_method,
+            )
+            if bank_result is not None:
+                return {
+                    "payment_url": bank_result.get("virtual_account"),
+                    "instructions": bank_result.get(
+                        "instructions",
+                        f"Complete bank payment of {amount} GHS for {transaction_reference}",
+                    ),
+                }
             return {
                 "instructions": f"Transfer {amount} GHS from your bank using reference {bank_reference or transaction_reference}"
             }
@@ -280,14 +385,52 @@ class PaymentService:
                 ),
             }
         elif provider == "telecel":
-            # Telecel Cash API
+            telecel = await try_telecel_cash_checkout(
+                transaction_reference=transaction_reference,
+                amount=amount,
+                phone_number=phone_number,
+                base_url=settings.telecel_base_url,
+                api_key=settings.telecel_api_key,
+                api_secret=settings.telecel_api_secret,
+            )
+            if telecel is not None:
+                return {
+                    "payment_url": None,
+                    "instructions": telecel.get(
+                        "instructions",
+                        f"Complete payment of {amount} GHS for {transaction_reference}",
+                    ),
+                }
             return {
-                "instructions": f"Dial *110# and enter code {transaction_reference[-6:]} to pay"
+                "payment_url": None,
+                "instructions": (
+                    f"Configure TELECEL_* env vars for live request-to-pay. "
+                    f"Dev stub: approve {amount} GHS on your Telecel Cash wallet when prompted (ref {transaction_reference})."
+                ),
             }
         elif provider == "airtel_tigo":
-            # AirtelTigo Money API
+            airteltigo = await try_airteltigo_checkout(
+                transaction_reference=transaction_reference,
+                amount=amount,
+                phone_number=phone_number,
+                base_url=settings.airteltigo_base_url,
+                api_key=settings.airteltigo_api_key,
+                api_secret=settings.airteltigo_api_secret,
+            )
+            if airteltigo is not None:
+                return {
+                    "payment_url": None,
+                    "instructions": airteltigo.get(
+                        "instructions",
+                        f"Complete payment of {amount} GHS for {transaction_reference}",
+                    ),
+                }
             return {
-                "instructions": f"Check your phone for payment prompt"
+                "payment_url": None,
+                "instructions": (
+                    f"Configure AIRTELTIGO_* env vars for live request-to-pay. "
+                    f"Dev stub: approve {amount} GHS on your AirtelTigo Money wallet when prompted (ref {transaction_reference})."
+                ),
             }
         else:
             raise PaymentError(f"Unsupported provider: {provider}")

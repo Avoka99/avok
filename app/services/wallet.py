@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta
+from datetime import datetime, timezone, timedelta
 from typing import Optional, List
 import logging
 import uuid
@@ -69,7 +69,7 @@ class WalletService:
             reference=f"DEP-{uuid.uuid4().hex[:12].upper()}",
             description=f"Deposit from {source_type}: {source_reference}",
             extra_data={"source_type": source_type, "source_reference": source_reference},
-            completed_at=datetime.utcnow(),
+            completed_at=datetime.now(timezone.utc),
         )
 
         self.db.add(transaction)
@@ -197,7 +197,7 @@ class WalletService:
             
             if payout_result["success"]:
                 transaction.status = TransactionStatus.COMPLETED
-                transaction.completed_at = datetime.utcnow()
+                transaction.completed_at = datetime.now(timezone.utc)
                 
                 # Move from pending to completed
                 wallet.pending_balance -= transaction.amount
@@ -239,6 +239,40 @@ class WalletService:
             raise
         
         return transaction
+
+    async def process_external_payout(
+        self,
+        *,
+        amount: float,
+        destination_type: str,
+        destination_reference: str,
+        reference: str,
+        momo_provider: Optional[str] = None,
+    ) -> dict:
+        """Send an external payout to the supplied mobile money or bank destination."""
+        if destination_type == "momo":
+            if not momo_provider:
+                return {
+                    "success": False,
+                    "error_message": "momo_provider is required for mobile money payouts",
+                }
+            return await self._process_momo_payout(
+                amount=amount,
+                phone_number=destination_reference,
+                provider=momo_provider,
+                reference=reference,
+            )
+        if destination_type == "bank":
+            return await self._process_momo_payout(
+                amount=amount,
+                phone_number=destination_reference,
+                provider="bank",
+                reference=reference,
+            )
+        return {
+            "success": False,
+            "error_message": f"Unsupported payout destination '{destination_type}'",
+        }
     
     async def _process_momo_payout(
         self,
@@ -247,17 +281,212 @@ class WalletService:
         provider: str,
         reference: str
     ) -> dict:
-        """Process Mobile Money payout (placeholder - integrate with provider API)."""
-        # In production, integrate with actual provider APIs
-        # This is a placeholder that always succeeds
-        
+        """Process Mobile Money payout.
+
+        Production integration:
+        - MTN MoMo Disbursement: https://momodeveloper.mtn.com/
+        - Telecel Cash: Contact Telecel for disbursement API
+        - AirtelTigo Money: Contact AT for disbursement API
+
+        For sandbox testing, set WALLET_PAYOUT_SIMULATE=true in env
+        to simulate successful payouts without real provider calls.
+        """
+        from app.core.config import settings
+
         logger.info(f"Processing payout: {amount} GHS to {phone_number} via {provider}")
-        
-        # Simulate API call
+
+        if settings.wallet_payout_simulate or settings.debug:
+            logger.info(f"Simulated payout successful: {reference}")
+            return {
+                "success": True,
+                "transaction_id": f"PAYOUT-{reference}",
+                "message": "Payout successful (simulated)",
+            }
+
+        if provider.lower() == "mtn":
+            return await self._process_mtn_disbursement(amount, phone_number, reference)
+        elif provider.lower() == "telecel":
+            return await self._process_telecel_disbursement(amount, phone_number, reference)
+        elif provider.lower() in {"airteltigo", "airtel_tigo"}:
+            return await self._process_airteltigo_disbursement(amount, phone_number, reference)
+        elif provider.lower() == "bank":
+            return await self._process_bank_disbursement(amount, phone_number, reference)
+
+        logger.warning(f"No payout provider configured for {provider}")
         return {
-            "success": True,
-            "transaction_id": f"PAYOUT-{reference}",
-            "message": "Payout successful"
+            "success": False,
+            "error_message": f"Payout provider '{provider}' is not configured. Set WALLET_PAYOUT_SIMULATE=true for testing."
+        }
+
+    async def _process_mtn_disbursement(
+        self,
+        amount: float,
+        phone_number: str,
+        reference: str
+    ) -> dict:
+        """Process MTN MoMo disbursement via official API."""
+        from app.core.config import settings
+        from app.integrations.mtn_momo_disbursement import try_mtn_momo_disbursement
+
+        result = await try_mtn_momo_disbursement(
+            amount=amount,
+            phone_number=phone_number,
+            reference=reference,
+            base_url=settings.mtn_momo_disbursement_base_url,
+            subscription_key=settings.mtn_momo_disbursement_subscription_key,
+            api_user=settings.mtn_momo_disbursement_api_user,
+            api_key=settings.mtn_momo_disbursement_api_key,
+            target_environment=settings.mtn_momo_target_environment,
+            currency=settings.mtn_momo_currency,
+        )
+
+        if result is None:
+            return {
+                "success": False,
+                "error_message": "MTN disbursement credentials not configured. Set MTN_MOMO_DISBURSEMENT_* env vars."
+            }
+
+        if result.get("status") == "accepted":
+            return {
+                "success": True,
+                "transaction_id": result.get("mtn_reference_id", reference),
+                "message": result.get("instructions", "Payout initiated"),
+            }
+
+        return {
+            "success": False,
+            "error_message": result.get("error_detail", result.get("instructions", "MTN disbursement failed")),
+        }
+
+    async def _process_telecel_disbursement(
+        self,
+        amount: float,
+        phone_number: str,
+        reference: str
+    ) -> dict:
+        """Process Telecel Cash disbursement via official API."""
+        from app.core.config import settings
+        from app.integrations.telecel_cash import try_telecel_disbursement
+
+        result = await try_telecel_disbursement(
+            amount=amount,
+            phone_number=phone_number,
+            reference=reference,
+            base_url=settings.telecel_base_url,
+            api_key=settings.telecel_api_key,
+            api_secret=settings.telecel_api_secret,
+        )
+
+        if result is None:
+            return {
+                "success": False,
+                "error_message": "Telecel disbursement credentials not configured. Set TELECEL_* env vars."
+            }
+
+        if result.get("status") == "accepted":
+            return {
+                "success": True,
+                "transaction_id": result.get("telecel_reference_id", reference),
+                "message": result.get("instructions", "Telecel payout initiated"),
+            }
+
+        return {
+            "success": False,
+            "error_message": result.get("error_detail", result.get("instructions", "Telecel disbursement failed")),
+        }
+
+    async def _process_airteltigo_disbursement(
+        self,
+        amount: float,
+        phone_number: str,
+        reference: str
+    ) -> dict:
+        """Process AirtelTigo Money disbursement via official API."""
+        from app.core.config import settings
+        from app.integrations.airteltigo_money import try_airteltigo_disbursement
+
+        result = await try_airteltigo_disbursement(
+            amount=amount,
+            phone_number=phone_number,
+            reference=reference,
+            base_url=settings.airteltigo_base_url,
+            api_key=settings.airteltigo_api_key,
+            api_secret=settings.airteltigo_api_secret,
+        )
+
+        if result is None:
+            return {
+                "success": False,
+                "error_message": "AirtelTigo disbursement credentials not configured. Set AIRTELTIGO_* env vars."
+            }
+
+        if result.get("status") == "accepted":
+            return {
+                "success": True,
+                "transaction_id": result.get("airteltigo_reference_id", reference),
+                "message": result.get("instructions", "AirtelTigo payout initiated"),
+            }
+
+        return {
+            "success": False,
+            "error_message": result.get("error_detail", result.get("instructions", "AirtelTigo disbursement failed")),
+        }
+
+    async def _process_bank_disbursement(
+        self,
+        amount: float,
+        account_number: str,
+        reference: str
+    ) -> dict:
+        """Process bank disbursement via direct sponsor bank integration (GhIPSS).
+        
+        Uses payout_reference to extract bank details:
+        Format: "bank_code:account_number:recipient_name"
+        """
+        from app.core.config import settings
+        from app.integrations.bank_disbursement import try_bank_disbursement
+
+        parts = account_number.split(":")
+        if len(parts) >= 3:
+            bank_code = parts[0]
+            acct_num = parts[1]
+            recipient_name = parts[2]
+        else:
+            logger.warning(f"Bank payout reference format unexpected: {account_number}")
+            return {
+                "success": False,
+                "error_message": "Bank payout reference must be in format: bank_code:account_number:recipient_name"
+            }
+
+        result = await try_bank_disbursement(
+            amount=amount,
+            account_number=acct_num,
+            bank_code=bank_code,
+            reference=reference,
+            recipient_name=recipient_name,
+            provider=settings.bank_disbursement_method,
+            sponsor_bank_api_url=settings.sponsor_bank_api_url,
+            sponsor_bank_api_key=settings.sponsor_bank_api_key,
+            sponsor_bank_api_secret=settings.sponsor_bank_api_secret,
+            avok_settlement_account=settings.avok_settlement_account,
+        )
+
+        if result is None:
+            return {
+                "success": False,
+                "error_message": "Bank disbursement not configured. Set SPONSOR_BANK_* env vars."
+            }
+
+        if result.get("status") == "accepted":
+            return {
+                "success": True,
+                "transaction_id": result.get("ghipss_reference", result.get("batch_reference", reference)),
+                "message": result.get("instructions", "Bank transfer initiated"),
+            }
+
+        return {
+            "success": False,
+            "error_message": result.get("error_detail", result.get("instructions", "Bank transfer failed")),
         }
     
     async def _get_wallet(self, user_id: int) -> Wallet:

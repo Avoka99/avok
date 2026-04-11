@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta
+from datetime import datetime, timezone, timedelta
 from typing import Optional, Union, Any
 from jose import JWTError, jwt
 from passlib.context import CryptContext
@@ -9,6 +9,7 @@ import hmac
 import logging
 
 from app.core.config import settings
+from app.core.redis_client import cache_get, cache_set
 
 logger = logging.getLogger(__name__)
 
@@ -31,11 +32,11 @@ def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -
     to_encode = data.copy()
     
     if expires_delta:
-        expire = datetime.utcnow() + expires_delta
+        expire = datetime.now(timezone.utc) + expires_delta
     else:
-        expire = datetime.utcnow() + timedelta(minutes=settings.jwt_access_token_expire_minutes)
+        expire = datetime.now(timezone.utc) + timedelta(minutes=settings.jwt_access_token_expire_minutes)
     
-    to_encode.update({"exp": expire, "type": "access"})
+    to_encode.update({"exp": expire, "type": "access", "jti": secrets.token_hex(16)})
     encoded_jwt = jwt.encode(to_encode, settings.jwt_secret_key, algorithm=settings.jwt_algorithm)
     
     return encoded_jwt
@@ -44,9 +45,9 @@ def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -
 def create_refresh_token(data: dict) -> str:
     """Create JWT refresh token."""
     to_encode = data.copy()
-    expire = datetime.utcnow() + timedelta(days=settings.jwt_refresh_token_expire_days)
+    expire = datetime.now(timezone.utc) + timedelta(days=settings.jwt_refresh_token_expire_days)
     
-    to_encode.update({"exp": expire, "type": "refresh"})
+    to_encode.update({"exp": expire, "type": "refresh", "jti": secrets.token_hex(16)})
     encoded_jwt = jwt.encode(to_encode, settings.jwt_secret_key, algorithm=settings.jwt_algorithm)
     
     return encoded_jwt
@@ -75,8 +76,8 @@ def create_guest_refresh_token(guest_session_id: int, order_reference: str, expi
         "guest_session_id": guest_session_id,
         "order_reference": order_reference,
     }
-    expire = datetime.utcnow() + (expires_delta or timedelta(hours=24))
-    to_encode.update({"exp": expire, "type": "refresh"})
+    expire = datetime.now(timezone.utc) + (expires_delta or timedelta(hours=24))
+    to_encode.update({"exp": expire, "type": "refresh", "jti": secrets.token_hex(16)})
     return jwt.encode(to_encode, settings.jwt_secret_key, algorithm=settings.jwt_algorithm)
 
 
@@ -92,6 +93,28 @@ def decode_token(token: str) -> Optional[dict]:
     except JWTError as e:
         logger.warning(f"Token decode error: {e}")
         return None
+
+
+def _token_cache_key(token: str) -> str:
+    return f"revoked_token:{hashlib.sha256(token.encode('utf-8')).hexdigest()}"
+
+
+async def revoke_token(token: str, expires_in_seconds: Optional[int] = None) -> None:
+    """Blacklist a token until it would naturally expire."""
+    payload = decode_token(token)
+    ttl_seconds = expires_in_seconds
+
+    if ttl_seconds is None and payload and payload.get("exp"):
+        expires_at = datetime.fromtimestamp(payload["exp"], tz=timezone.utc)
+        ttl_seconds = max(int((expires_at - datetime.now(timezone.utc)).total_seconds()), 1)
+
+    await cache_set(_token_cache_key(token), {"revoked": True}, ttl_seconds=ttl_seconds)
+
+
+async def is_token_revoked(token: str) -> bool:
+    """Check whether a token has been revoked."""
+    record = await cache_get(_token_cache_key(token))
+    return bool(record and record.get("revoked"))
 
 
 def generate_otp() -> str:

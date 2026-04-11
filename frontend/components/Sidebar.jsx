@@ -37,7 +37,7 @@ export default function Sidebar() {
         <p className="mt-2 text-sm leading-6 text-emerald-50">Track funds, verify payments, and keep checkout decisions easy to follow.</p>
       </div>
 
-      <nav className="mt-4 space-y-2">
+      <nav className="mt-4 space-y-2" role="navigation" aria-label="Dashboard navigation">
         {items.map((item) => {
           const Icon = item.icon;
           const active = pathname === item.href;
@@ -48,6 +48,7 @@ export default function Sidebar() {
               className={`flex items-center gap-3 rounded-2xl px-4 py-3 text-sm font-semibold transition ${
                 active ? "bg-emerald-50 text-emerald-800" : "text-stone-600 hover:bg-stone-50"
               }`}
+              aria-current={active ? "page" : undefined}
             >
               <Icon className="h-4 w-4" />
               {item.label}

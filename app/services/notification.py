@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timezone
 import logging
 from typing import Dict, List, Optional
 
@@ -11,7 +11,7 @@ from app.core.config import settings
 from app.core.exceptions import NotFoundError
 from app.models.notification import Notification, NotificationStatus, NotificationType
 from app.models.order import Order
-from app.models.user import User
+from app.models.user import User, UserRole, UserStatus
 
 logger = logging.getLogger(__name__)
 
@@ -116,7 +116,7 @@ class NotificationService:
             recipient=recipient,
             order_reference=order_reference,
             action_url=action_url,
-            sent_at=datetime.utcnow(),
+            sent_at=datetime.now(timezone.utc),
         )
         self.db.add(notification)
         await self.db.commit()
@@ -472,6 +472,30 @@ class NotificationService:
             guest_checkout_session_id=order.guest_checkout_session_id,
         )
 
+    async def notify_admins(
+        self,
+        *,
+        title: str,
+        message: str,
+        action_url: Optional[str] = None,
+        order_reference: Optional[str] = None,
+    ) -> None:
+        admins = await self._get_active_admins()
+        for admin in admins:
+            await self.notify_contact(
+                title=title,
+                message=message,
+                contact={
+                    "phone_number": admin.phone_number,
+                    "email": admin.email,
+                    "full_name": admin.full_name,
+                },
+                order_reference=order_reference,
+                action_url=action_url,
+                email_subject=title,
+                user_id=admin.id,
+            )
+
     async def _create_channel_notification(
         self,
         *,
@@ -503,7 +527,7 @@ class NotificationService:
     async def _finalize_channel_notification(self, notification: Notification, provider_result: Dict[str, Optional[str]]) -> None:
         if provider_result.get("success"):
             notification.status = NotificationStatus.SENT
-            notification.sent_at = datetime.utcnow()
+            notification.sent_at = datetime.now(timezone.utc)
             notification.external_id = provider_result.get("external_id")
         else:
             notification.status = NotificationStatus.FAILED
@@ -511,6 +535,10 @@ class NotificationService:
         await self.db.commit()
 
     async def _send_sms_provider(self, phone_number: str, message: str) -> Dict[str, Optional[str]]:
+        if settings.debug or settings.app_env != "production":
+            logger.info("Simulated SMS delivery in %s mode; %s", settings.app_env, message)
+            return {"success": True, "external_id": "debug-simulated"}
+
         if settings.africastalking_api_key:
             try:
                 async with httpx.AsyncClient(timeout=10.0) as client:
@@ -532,11 +560,13 @@ class NotificationService:
                 return {"success": False, "error_message": str(exc)}
 
         logger.info("SMS provider not configured; %s", message)
-        if settings.debug or settings.app_env != "production":
-            return {"success": True, "external_id": "debug-simulated"}
         return {"success": False, "error_message": "SMS provider is not configured"}
 
     async def _send_email_provider(self, email: str, subject: str, content: str) -> Dict[str, Optional[str]]:
+        if settings.debug or settings.app_env != "production":
+            logger.info("Simulated email delivery in %s mode; %s", settings.app_env, subject)
+            return {"success": True, "external_id": "debug-simulated"}
+
         if settings.sendgrid_api_key:
             try:
                 async with httpx.AsyncClient(timeout=10.0) as client:
@@ -561,8 +591,6 @@ class NotificationService:
                 return {"success": False, "error_message": str(exc)}
 
         logger.info("Email provider not configured; %s", subject)
-        if settings.debug or settings.app_env != "production":
-            return {"success": True, "external_id": "debug-simulated"}
         return {"success": False, "error_message": "Email provider is not configured"}
 
     def _build_checkout_link(self, order_reference: str) -> str:
@@ -575,6 +603,15 @@ class NotificationService:
         if not user:
             raise NotFoundError("User", user_id)
         return user
+
+    async def _get_active_admins(self) -> List[User]:
+        result = await self.db.execute(
+            select(User).where(
+                User.role.in_([UserRole.ADMIN, UserRole.SUPER_ADMIN]),
+                User.status == UserStatus.ACTIVE,
+            )
+        )
+        return result.scalars().all()
 
     async def _get_order(self, order_id: int) -> Order:
         result = await self.db.execute(

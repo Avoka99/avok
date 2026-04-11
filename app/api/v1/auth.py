@@ -1,18 +1,29 @@
 from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.ext.asyncio import AsyncSession
 from datetime import datetime
 
-from app.api.dependencies import get_db, get_current_user, get_current_super_admin
+from app.api.dependencies import get_db, get_current_user, get_current_super_admin, get_current_admin
 from app.schemas.user import (
     UserCreate, UserLogin, UserResponse, Token, 
     PhoneVerificationSend, PhoneVerificationRequest, KYCSubmission, AdminRoleRequest,
-    UserMeResponse
+    UserMeResponse, RefreshTokenRequest
 )
 from app.services.auth import AuthService
-from app.core.security import create_access_token, create_refresh_token
+from app.services.guest_checkout import GuestCheckoutService
+from app.core.security import (
+    create_access_token,
+    create_refresh_token,
+    create_guest_access_token,
+    create_guest_refresh_token,
+    decode_token,
+    is_token_revoked,
+    revoke_token,
+)
 from app.core.exceptions import ValidationError, UnauthorizedError
 
 router = APIRouter(prefix="/auth", tags=["authentication"])
+auth_security = HTTPBearer(auto_error=False)
 
 
 @router.post("/register", response_model=UserResponse)
@@ -48,6 +59,120 @@ async def login(
     refresh_token = create_refresh_token(data={"sub": str(user.id)})
     
     return {"access_token": access_token, "refresh_token": refresh_token}
+
+
+@router.post("/refresh", response_model=Token)
+async def refresh_token(
+    payload: RefreshTokenRequest,
+    db: AsyncSession = Depends(get_db),
+):
+    """Rotate a refresh token and issue a new access token pair."""
+    if await is_token_revoked(payload.refresh_token):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Refresh token has been revoked",
+        )
+
+    token_payload = decode_token(payload.refresh_token)
+    if not token_payload or token_payload.get("type") != "refresh":
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid refresh token",
+        )
+
+    if token_payload.get("subject_type") == "guest_checkout":
+        guest_session_id = token_payload.get("guest_session_id")
+        order_reference = token_payload.get("order_reference")
+        if not guest_session_id or not order_reference:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid guest refresh token payload",
+            )
+
+        guest_service = GuestCheckoutService(db)
+        await guest_service.get_active_session(int(guest_session_id))
+        access_token = create_guest_access_token(int(guest_session_id), order_reference)
+        new_refresh_token = create_guest_refresh_token(int(guest_session_id), order_reference)
+    else:
+        user_id = token_payload.get("sub")
+        if not user_id:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid refresh token payload",
+            )
+
+        auth_service = AuthService(db)
+        user = await auth_service._get_user(int(user_id))
+        if not user:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="User not found",
+            )
+
+        access_token = create_access_token(data={"sub": str(user.id), "role": user.role})
+        new_refresh_token = create_refresh_token(data={"sub": str(user.id)})
+
+    await revoke_token(payload.refresh_token)
+    return {
+        "access_token": access_token,
+        "refresh_token": new_refresh_token,
+        "token_type": "bearer",
+    }
+
+
+@router.post("/logout")
+async def logout(
+    payload: RefreshTokenRequest | None = None,
+    credentials: HTTPAuthorizationCredentials | None = Depends(auth_security),
+):
+    """Revoke the caller's current access token and optional refresh token."""
+    revoked_any = False
+
+    if credentials and credentials.credentials:
+        await revoke_token(credentials.credentials)
+        revoked_any = True
+
+    if payload and payload.refresh_token:
+        await revoke_token(payload.refresh_token)
+        revoked_any = True
+
+    if not revoked_any:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No token provided for logout",
+        )
+
+    return {"message": "Logged out successfully"}
+
+
+@router.post("/password-reset/request")
+async def request_password_reset(
+    phone_number: str,
+    db: AsyncSession = Depends(get_db)
+):
+    """Request password reset OTP."""
+    auth_service = AuthService(db)
+    try:
+        await auth_service.request_password_reset(phone_number)
+        return {"message": "Password reset code sent to your phone"}
+    except Exception as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+
+
+@router.post("/password-reset/confirm")
+async def confirm_password_reset(
+    phone_number: str,
+    otp: str,
+    new_password: str,
+    db: AsyncSession = Depends(get_db)
+):
+    """Confirm password reset with OTP."""
+    auth_service = AuthService(db)
+    try:
+        await auth_service.confirm_password_reset(phone_number, otp, new_password)
+        return {"message": "Password reset successfully"}
+    except Exception as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
 
 
 @router.get("/me", response_model=UserMeResponse)
@@ -127,7 +252,39 @@ async def dismiss_admin(
     current_super_admin=Depends(get_current_super_admin),
     db: AsyncSession = Depends(get_db)
 ):
-    """Dismiss an Admin. Only Super Admins can do this."""
+    """Dismiss an admin. Only Super Admins can do this."""
     auth_service = AuthService(db)
     user = await auth_service.dismiss_admin(payload.phone_number)
     return user
+
+
+@router.post("/kyc/approve/{user_id}")
+async def approve_kyc(
+    user_id: int,
+    current_admin=Depends(get_current_admin),
+    db: AsyncSession = Depends(get_db)
+):
+    """Admin approves a user's KYC submission."""
+    auth_service = AuthService(db)
+    try:
+        user = await auth_service.approve_kyc(user_id, current_admin.id)
+        return {"message": "KYC approved", "user_id": user_id}
+    except Exception as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+
+
+@router.post("/kyc/reject/{user_id}")
+async def reject_kyc(
+    user_id: int,
+    payload: dict,
+    current_admin=Depends(get_current_admin),
+    db: AsyncSession = Depends(get_db)
+):
+    """Admin rejects a user's KYC submission with reason."""
+    reason = payload.get("reason", "No reason provided")
+    auth_service = AuthService(db)
+    try:
+        user = await auth_service.reject_kyc(user_id, current_admin.id, reason)
+        return {"message": "KYC rejected", "user_id": user_id, "reason": reason}
+    except Exception as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))

@@ -51,6 +51,7 @@ function formatApiErrorDetail(detail) {
 api.interceptors.response.use(
   (response) => response,
   async (error) => {
+    const originalRequest = error?.config || {};
     const status = error?.response?.status;
     const data = error?.response?.data;
     const formatted = formatApiErrorDetail(data?.detail);
@@ -63,7 +64,26 @@ api.interceptors.response.use(
     if (status === 401 && typeof window !== "undefined") {
       try {
         const { useAuthStore } = await import("@/stores/auth-store");
-        useAuthStore.getState().logout();
+        const store = useAuthStore.getState();
+        const shouldTryRefresh =
+          !originalRequest.skipAuthRefresh &&
+          !originalRequest._retry &&
+          !String(originalRequest.url || "").includes("/auth/refresh") &&
+          !String(originalRequest.url || "").includes("/auth/logout") &&
+          !!store.refreshToken;
+
+        if (shouldTryRefresh) {
+          originalRequest._retry = true;
+          const refreshed = await store.refreshSession();
+          const nextAccessToken = refreshed?.access_token || store.accessToken;
+          if (nextAccessToken) {
+            originalRequest.headers = originalRequest.headers || {};
+            originalRequest.headers.Authorization = `Bearer ${nextAccessToken}`;
+            return api(originalRequest);
+          }
+        }
+
+        await store.logout({ localOnly: true });
       } catch {
         setApiToken(null);
         window.localStorage.removeItem("avok-auth");

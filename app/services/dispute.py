@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional, List, Dict
 import logging
 import uuid
@@ -43,7 +43,7 @@ class DisputeService:
         if order.buyer_id != buyer_id:
             raise PermissionDeniedError("Only the payer can open a dispute")
         
-        if order.escrow_status not in [OrderStatus.PAYMENT_CONFIRMED, OrderStatus.SHIPPED]:
+        if order.escrow_status not in [OrderStatus.PAYMENT_CONFIRMED, OrderStatus.SHIPPED, OrderStatus.DELIVERED]:
             raise DisputeError(f"Cannot open dispute for checkout session in status: {order.escrow_status}")
         
         # Check if dispute already exists
@@ -53,6 +53,10 @@ class DisputeService:
         
         # Update order status
         order.escrow_status = OrderStatus.DISPUTED
+        
+        # Increment buyer's dispute count for fraud detection
+        buyer = await self._get_user(buyer_id)
+        buyer.dispute_count = (buyer.dispute_count or 0) + 1
         
         # Create dispute
         dispute = Dispute(
@@ -243,11 +247,11 @@ class DisputeService:
         
         dispute.resolution_notes = notes
         dispute.resolved_by_id = admin_action.requested_by_id
-        dispute.resolved_at = datetime.utcnow()
+        dispute.resolved_at = datetime.now(timezone.utc)
         
         admin_action.status = AdminActionStatus.EXECUTED
         admin_action.executed_by_id = admin_action.requested_by_id
-        admin_action.executed_at = datetime.utcnow()
+        admin_action.executed_at = datetime.now(timezone.utc)
         
         await self.db.commit()
         
@@ -315,5 +319,14 @@ class DisputeService:
     
     async def _notify_admins_new_dispute(self, dispute: Dispute):
         """Notify admins about new dispute."""
-        # In production, send to admin notification queue
-        pass
+        order = dispute.order if dispute.order is not None else await self._get_order(dispute.order_id)
+        action_url = f"{settings.frontend_base_url.rstrip('/')}/admin"
+        await self.notification_service.notify_admins(
+            title="New dispute requires review",
+            message=(
+                f"Dispute {dispute.dispute_reference} was opened for checkout session "
+                f"{order.order_reference}. Review the dispute queue and escrow session now."
+            ),
+            action_url=action_url,
+            order_reference=order.order_reference,
+        )

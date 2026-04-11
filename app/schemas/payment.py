@@ -20,7 +20,7 @@ class PaymentInitiate(BaseModel):
 
     session_reference: Optional[str] = Field(default=None, validation_alias=AliasChoices("session_reference", "order_reference"))
     funding_source: FundingSource = FundingSource.VERIFIED_ACCOUNT
-    payout_destination: FundingSource = FundingSource.VERIFIED_ACCOUNT
+    payout_destination: str = Field(default="avok_account", description="avok_account, momo, or bank")
     momo_provider: Optional[MobileMoneyProvider] = None
     momo_number: Optional[str] = Field(default=None, min_length=10, max_length=12)
     bank_reference: Optional[str] = None

@@ -9,11 +9,12 @@ class KYCService:
     def __init__(self, db: AsyncSession):
         self.auth_service = AuthService(db)
 
-    async def submit(self, user_id: int, ghana_card_number: str, ghana_card_image_url: str, selfie_image_url: str):
+    async def submit(self, user_id: int, document_type: str, document_number: str, document_image_url: str, selfie_image_url: str):
         return await self.auth_service.submit_kyc(
             user_id=user_id,
-            ghana_card_number=ghana_card_number,
-            ghana_card_image_url=ghana_card_image_url,
+            document_type=document_type,
+            document_number=document_number,
+            document_image_url=document_image_url,
             selfie_image_url=selfie_image_url,
         )
 

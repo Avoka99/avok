@@ -3,7 +3,7 @@ import os
 import uuid
 import logging
 from typing import Optional
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 from app.core.config import settings
@@ -41,7 +41,7 @@ class StorageService:
             # Generate unique filename
             file_extension = os.path.splitext(file.filename)[1]
             unique_id = uuid.uuid4().hex
-            timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+            timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
             
             if user_id:
                 filename = f"{user_id}_{timestamp}_{unique_id}{file_extension}"

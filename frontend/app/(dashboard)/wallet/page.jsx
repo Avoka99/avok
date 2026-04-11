@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { api } from "@/lib/api";
 import { calculateCappedFee, formatGhs } from "@/lib/fees";
@@ -66,7 +66,7 @@ export default function WalletPage() {
     }
   });
 
-  useMemo(() => {
+  useEffect(() => {
     if (transactionsQuery.data) {
       const items = transactionsQuery.data.items || [];
       if (transactionPage === 0) {
@@ -184,6 +184,20 @@ export default function WalletPage() {
             className="mt-5 space-y-4"
             onSubmit={(event) => {
               event.preventDefault();
+              const amount = parseFloat(deposit.amount);
+              if (!deposit.amount || isNaN(amount) || amount <= 0) {
+                setDepositFormError("Please enter a valid deposit amount greater than 0");
+                return;
+              }
+              if (amount > 100000) {
+                setDepositFormError("Maximum deposit amount is GHS 100,000");
+                return;
+              }
+              if (!deposit.source_label || deposit.source_label.trim().length < 5) {
+                setDepositFormError("Please enter a valid source reference");
+                return;
+              }
+              setDepositFormError(null);
               depositMutation.mutate(deposit);
             }}
           >
@@ -316,7 +330,7 @@ export default function WalletPage() {
                 placeholder="Bank name"
               />
             )}
-            <button className="btn-primary w-full" type="submit">
+            <button className="btn-primary w-full" type="submit" disabled={withdrawMutation.isPending}>
               {withdrawMutation.isPending ? "Submitting..." : "Request withdrawal"}
             </button>
           </form>

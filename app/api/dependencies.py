@@ -6,7 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
 from app.core.config import settings
-from app.core.security import decode_token
+from app.core.security import decode_token, is_token_revoked
 from app.models.guest_checkout import GuestCheckoutSession
 from app.models.user import User, UserRole, UserStatus
 from app.services.auth import AuthService
@@ -32,6 +32,12 @@ async def get_current_user(
 ) -> User:
     """Get current authenticated user."""
     token = credentials.credentials
+    if await is_token_revoked(token):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Authentication token has been revoked",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
     payload = decode_token(token)
     
     if not payload or payload.get("type") != "access":
@@ -78,6 +84,12 @@ async def get_current_checkout_actor(
 ):
     """Get either a permanent user or a temporary guest checkout actor."""
     token = credentials.credentials
+    if await is_token_revoked(token):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Authentication token has been revoked",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
     payload = decode_token(token)
 
     if not payload or payload.get("type") != "access":
@@ -118,13 +130,6 @@ async def get_current_admin(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Admin privileges required",
         )
-    return current_user
-
-
-async def get_current_seller(
-    current_user: User = Depends(get_current_user)
-) -> User:
-    """Backward-compatible alias for order-level recipient checks."""
     return current_user
 
 

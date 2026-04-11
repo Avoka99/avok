@@ -1,6 +1,6 @@
 from typing import Dict, List, Optional
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timezone, timedelta
 
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, and_, func
@@ -12,6 +12,7 @@ from app.models.dispute import Dispute, DisputeStatus
 from app.models.transaction import Transaction
 from app.core.config import settings
 from app.core.exceptions import NotFoundError
+from app.services.notification import NotificationService
 
 logger = logging.getLogger(__name__)
 
@@ -21,6 +22,7 @@ class FraudDetectionService:
     
     def __init__(self, db: AsyncSession):
         self.db = db
+        self.notification_service = NotificationService(db)
     
     async def analyze_dispute(self, dispute: Dispute) -> Dict:
         """Analyze dispute for potential fraud."""
@@ -62,7 +64,7 @@ class FraudDetectionService:
                 fraud_score += 15
                 flags.append("Multiple recent disputes against external recipient contact")
         
-        if order.created_at > datetime.utcnow() - timedelta(hours=24):
+        if self._ensure_utc(order.created_at) > datetime.now(timezone.utc) - timedelta(hours=24):
             fraud_score += 5
             flags.append("Order created less than 24 hours ago")
         
@@ -77,7 +79,7 @@ class FraudDetectionService:
             "fraud_score": fraud_score,
             "is_fraudulent": is_fraudulent,
             "flags": flags,
-            "analysis_timestamp": datetime.utcnow().isoformat()
+            "analysis_timestamp": datetime.now(timezone.utc).isoformat()
         }
     
     async def analyze_user(self, user_id: int) -> Dict:
@@ -100,7 +102,7 @@ class FraudDetectionService:
             fraud_score += 30
             flags.append("Low order completion rate")
         
-        account_age = (datetime.utcnow() - user.created_at).days
+        account_age = (datetime.now(timezone.utc) - self._ensure_utc(user.created_at)).days
         if account_age < settings.fraud_new_account_days and disputes_count > 0:
             fraud_score += 25
             flags.append("New account with disputes")
@@ -121,7 +123,7 @@ class FraudDetectionService:
             "fraud_score": fraud_score,
             "is_flagged": user.is_flagged,
             "flags": flags,
-            "analysis_timestamp": datetime.utcnow().isoformat()
+            "analysis_timestamp": datetime.now(timezone.utc).isoformat()
         }
     
     async def flag_user(self, user_id: int, reason: str) -> User:
@@ -154,7 +156,7 @@ class FraudDetectionService:
 
     async def _count_recent_disputes_by_contact(self, recipient_contact: str, days: int) -> int:
         """Count recent disputes involving an external recipient contact."""
-        cutoff = datetime.utcnow() - timedelta(days=days)
+        cutoff = datetime.now(timezone.utc) - timedelta(days=days)
         result = await self.db.execute(
             select(func.count())
             .select_from(Dispute)
@@ -171,7 +173,7 @@ class FraudDetectionService:
     
     async def _count_recent_disputes(self, user_id: int, days: int) -> int:
         """Count recent disputes."""
-        cutoff = datetime.utcnow() - timedelta(days=days)
+        cutoff = datetime.now(timezone.utc) - timedelta(days=days)
         result = await self.db.execute(
             select(func.count()).where(
                 and_(
@@ -239,4 +241,18 @@ class FraudDetectionService:
     
     async def _notify_admins_fraud_flag(self, user_id: int, reason: str):
         """Notify admins about flagged user."""
-        pass
+        action_url = f"{settings.frontend_base_url.rstrip('/')}/admin"
+        await self.notification_service.notify_admins(
+            title="Fraud flag requires admin review",
+            message=(
+                f"User {user_id} was flagged by the fraud engine. "
+                f"Reason: {reason}. Review the account and recent escrow activity."
+            ),
+            action_url=action_url,
+        )
+
+    @staticmethod
+    def _ensure_utc(value: datetime) -> datetime:
+        if value.tzinfo is None:
+            return value.replace(tzinfo=timezone.utc)
+        return value.astimezone(timezone.utc)

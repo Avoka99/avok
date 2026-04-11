@@ -1,5 +1,5 @@
 from app.services.kyc_provider import ExternalKYCProvider
-from datetime import datetime, timedelta
+from datetime import datetime, timezone, timedelta
 from typing import Optional
 import logging
 import secrets
@@ -48,13 +48,13 @@ class AuthService:
             if existing_email:
                 raise ValidationError("User with this email already exists")
         
-        # Create user
+        # Create user (always USER role - admins are appointed via admin endpoints only)
         user = User(
             email=user_data.email,
             phone_number=user_data.phone_number,
             hashed_password=get_password_hash(user_data.password),
             full_name=user_data.full_name,
-            role=user_data.role,
+            role=UserRole.USER,
             status=UserStatus.PENDING,
             avok_account_number=self._generate_account_number() if getattr(user_data, 'wants_avok_account', False) else None
         )
@@ -90,23 +90,28 @@ class AuthService:
             return None
         
         # Check if account is locked
-        if user.locked_until and user.locked_until > datetime.utcnow():
-            raise UnauthorizedError(f"Account locked until {user.locked_until}")
+        now = datetime.now(timezone.utc)
+        if user.locked_until:
+            locked = user.locked_until
+            if locked.tzinfo is None:
+                locked = locked.replace(tzinfo=timezone.utc)
+            if locked > now:
+                raise UnauthorizedError(f"Account locked until {user.locked_until}")
         
         # Verify password
         if not verify_password(password, user.hashed_password):
-            user.login_attempts += 1
+            user.login_attempts = (user.login_attempts or 0) + 1
             
             # Lock account after 5 failed attempts
             if user.login_attempts >= 5:
-                user.locked_until = datetime.utcnow() + timedelta(minutes=30)
+                user.locked_until = now + timedelta(minutes=30)
             
             await self.db.commit()
             return None
         
         # Reset login attempts on success
         user.login_attempts = 0
-        user.last_login_at = datetime.utcnow()
+        user.last_login_at = now
         user.locked_until = None
         
         await self.db.commit()
@@ -157,7 +162,7 @@ class AuthService:
         
         # Update user
         user.is_phone_verified = True
-        user.phone_verified_at = datetime.utcnow()
+        user.phone_verified_at = datetime.now(timezone.utc)
         user.status = UserStatus.ACTIVE
         
         await self.db.commit()
@@ -167,6 +172,35 @@ class AuthService:
         
         logger.info(f"Phone verified for user {user.id}")
         return True
+    
+    async def request_password_reset(self, phone_number: str):
+        """Generate and send OTP for password reset."""
+        user = await self._get_user_by_phone(phone_number)
+        if not user:
+            raise ValueError("Phone number not found")
+        
+        import random
+        otp = str(random.randint(100000, 999999))
+        await self._store_otp(phone_number, otp)
+        
+        logger.info(f"Password reset OTP generated for {phone_number}")
+    
+    async def confirm_password_reset(self, phone_number: str, otp: str, new_password: str):
+        """Verify OTP and reset password."""
+        user = await self._get_user_by_phone(phone_number)
+        if not user:
+            raise ValueError("Phone number not found")
+        
+        stored_otp = await self._get_stored_otp(phone_number)
+        if not stored_otp or stored_otp != otp:
+            raise ValueError("Invalid OTP")
+        
+        from app.core.security import get_password_hash
+        user.hashed_password = get_password_hash(new_password)
+        await self.db.commit()
+        await self._clear_otp(phone_number)
+        
+        logger.info(f"Password reset for user {user.id}")
     
     async def submit_kyc(
         self,
@@ -282,13 +316,6 @@ class AuthService:
         )
         return result.scalar_one_or_none()
     
-    async def _get_user_by_ghana_card(self, card_number: str) -> Optional[User]:
-        """Get user by Ghana Card number."""
-        result = await self.db.execute(
-            select(User).where(User.ghana_card_number == card_number)
-        )
-        return result.scalar_one_or_none()
-    
     async def _store_otp(self, phone_number: str, otp: str):
         """Store OTP (placeholder - use Redis in production)."""
         await cache_set(f"otp:{phone_number}", {"otp": otp}, ttl_seconds=self.OTP_TTL_SECONDS)
@@ -304,23 +331,11 @@ class AuthService:
         """Clear OTP (placeholder)."""
         await cache_delete(f"otp:{phone_number}")
     
-    async def _notify_admins_kyc_pending(self, user: User):
-        """Notify admins about pending KYC."""
-        # In production, send to admin notification queue
-        pass
-    
     @staticmethod
     def _validate_ghana_phone(phone: str) -> bool:
         """Validate Ghanaian phone number."""
         pattern = r'^(0[2459]\d{8})$'
         return bool(re.match(pattern, phone))
-    
-    @staticmethod
-    def _validate_ghana_card(card_number: str) -> bool:
-        """Validate Ghana Card number."""
-        card_number = re.sub(r'[\s-]', '', card_number.upper())
-        pattern = r'^GHA\d{9,10}$'
-        return bool(re.match(pattern, card_number))
 
     def _generate_account_number(self) -> str:
         return "".join([str(random.randint(0,9)) for _ in range(10)])

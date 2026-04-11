@@ -2,9 +2,12 @@ import pytest
 from datetime import datetime, timedelta
 from sqlalchemy import select
 
+from app.core.finance import calculate_capped_fee
 from app.services.escrow import EscrowService
 from app.services.order import OrderService
 from app.core.exceptions import EscrowError
+from app.models.guest_checkout import GuestCheckoutSession
+from app.models.transaction import Transaction, TransactionStatus, TransactionType
 from app.models.user import User, UserRole, UserStatus
 from app.models.order import DeliveryMethod, Order, OrderStatus
 from app.models.wallet import Wallet, WalletType
@@ -22,7 +25,7 @@ async def _get_order(db_session, order_id: int) -> Order:
 
 @pytest.mark.asyncio
 async def test_create_escrow_order(db_session):
-    """Test creating escrow order."""
+    """Test creating an escrow-backed order through the order service."""
     # Create users
     buyer = User(
         phone_number="0241234567",
@@ -47,20 +50,20 @@ async def test_create_escrow_order(db_session):
     db_session.add_all([buyer_wallet, seller_wallet])
     await db_session.commit()
     
-    # Test escrow creation
-    escrow_service = EscrowService(db_session)
-    order = await escrow_service.create_escrow_order(
+    order_service = OrderService(db_session)
+    order = await order_service.create_order(
         buyer_id=buyer.id,
-        seller_id=seller.id,
+        recipient_id=seller.id,
+        product_name="Test Product",
         product_price=100.0,
-        order_id=1
+        delivery_method=DeliveryMethod.PICKUP,
     )
     
     assert order.order_reference.startswith("AVOK-")
     assert order.product_price == 100.0
-    assert order.platform_fee == 1.0  # 1% fee
-    assert order.total_amount == 101.0
+    assert order.seller_id == seller.id
     assert order.escrow_status == OrderStatus.PENDING_PAYMENT
+    assert order.item_count == 1
 
 
 @pytest.mark.asyncio
@@ -366,6 +369,99 @@ async def test_release_to_external_recipient_applies_capped_fee_and_closes_tempo
     assert buyer_wallet.escrow_balance == 0.0
     assert order.escrow_status == OrderStatus.COMPLETED
     assert order.release_fee == 30.0
+    assert order.escrow_account_active is False
+
+
+@pytest.mark.parametrize(
+    ("amount", "expected_fee"),
+    [
+        (6_000.0, 30.0),
+        (10_000.0, 50.0),
+        (100_000.0, 100.0),
+        (1_000_000.0, 500.0),
+    ],
+)
+def test_calculate_capped_fee_uses_tiered_caps(amount, expected_fee):
+    assert calculate_capped_fee(amount, percent=1.0, cap_amount=30.0) == expected_fee
+
+
+@pytest.mark.asyncio
+async def test_guest_external_refund_returns_full_amount_to_original_source_without_fee(db_session):
+    guest_checkout = GuestCheckoutSession(
+        phone_number="0249998888",
+        full_name="Guest Buyer",
+        email="guest@example.com",
+    )
+    db_session.add(guest_checkout)
+    await db_session.commit()
+
+    order = Order(
+        order_reference="AVOK-GUEST-REFUND",
+        buyer_id=None,
+        guest_checkout_session_id=guest_checkout.id,
+        seller_id=None,
+        seller_display_name="External Recipient",
+        seller_contact="0247001111",
+        payout_destination="bank",
+        payout_reference="040100:1234567890:Guest Buyer",
+        payout_bank_name="Test Bank",
+        payout_metadata={
+            "refund_destination": {
+                "destination_type": "momo",
+                "destination_reference": "0249998888",
+                "provider": "mtn",
+                "charge_fee": False,
+            }
+        },
+        product_name="Guest Purchase",
+        product_price=100.0,
+        platform_fee=1.0,
+        total_amount=101.0,
+        entry_fee=1.0,
+        payment_source="momo",
+        escrow_status=OrderStatus.PAYMENT_CONFIRMED,
+        delivery_method=DeliveryMethod.PICKUP,
+    )
+    db_session.add(order)
+    await db_session.commit()
+
+    payment_txn = Transaction(
+        wallet_id=None,
+        order_id=order.id,
+        transaction_type=TransactionType.ESCROW_HOLD,
+        status=TransactionStatus.COMPLETED,
+        amount=101.0,
+        fee_amount=1.0,
+        net_amount=100.0,
+        reference="PAY-GUEST-REFUND",
+        momo_provider="mtn",
+        momo_number="0249998888",
+        extra_data={
+            "funding_source": "momo",
+            "refund_destination": {
+                "destination_type": "momo",
+                "destination_reference": "0249998888",
+                "provider": "mtn",
+                "charge_fee": False,
+            },
+        },
+    )
+    db_session.add(payment_txn)
+    await db_session.commit()
+
+    escrow_service = EscrowService(db_session)
+    refund_txn = await escrow_service.refund_buyer(order.id, "Recipient could not fulfill order")
+
+    order = await _get_order(db_session, order.id)
+
+    assert refund_txn.amount == 101.0
+    assert refund_txn.fee_amount == 0.0
+    assert refund_txn.net_amount == 101.0
+    assert refund_txn.wallet_id is None
+    assert refund_txn.extra_data["refund_to_original_source"] is True
+    assert refund_txn.extra_data["refund_destination"]["destination_reference"] == "0249998888"
+    assert refund_txn.extra_data["provider_result"]["success"] is True
+    assert order.escrow_status == OrderStatus.REFUNDED
     assert order.escrow_account_active is False
 
 

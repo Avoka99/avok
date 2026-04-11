@@ -1,5 +1,5 @@
 from datetime import datetime
-from sqlalchemy import Column, Integer, Float, String, DateTime, ForeignKey, Enum, JSON, Index
+from sqlalchemy import func, Column, Integer, Float, String, DateTime, ForeignKey, Enum, JSON, Index
 from sqlalchemy.orm import relationship
 import enum
 
@@ -54,8 +54,8 @@ class Transaction(Base):
     momo_approval_code = Column(String(50), nullable=True)
     
     # Timestamps
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
-    completed_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    completed_at = Column(DateTime(timezone=True), nullable=True)
     
     # Relationships
     wallet = relationship("Wallet", back_populates="transactions")
@@ -71,21 +71,3 @@ class Transaction(Base):
     
     def __repr__(self):
         return f"<Transaction {self.id}: {self.transaction_type.value} - {self.amount} GHS ({self.status.value})>"
-    
-    def to_dict(self):
-        """Convert transaction to dictionary."""
-        return {
-            "id": self.id,
-            "reference": self.reference,
-            "type": self.transaction_type.value,
-            "status": self.status.value,
-            "amount": self.amount,
-            "fee": self.fee_amount,
-            "net_amount": self.net_amount,
-            "description": self.description,
-	    "extra_data": self.extra_data,
-            "momo_provider": self.momo_provider,
-            "momo_transaction_id": self.momo_transaction_id,
-            "created_at": self.created_at.isoformat() if self.created_at else None,
-            "completed_at": self.completed_at.isoformat() if self.completed_at else None
-        }

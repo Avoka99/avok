@@ -1,6 +1,6 @@
 from datetime import datetime
 from sqlalchemy import (
-    Column, Integer, String, Text, DateTime, ForeignKey, Enum, JSON, Index
+    Column, Integer, String, Text, DateTime, ForeignKey, Enum, JSON, Index, func
 )
 from sqlalchemy.orm import relationship
 import enum
@@ -55,7 +55,7 @@ class Dispute(Base):
     # Resolution
     resolution_notes = Column(Text, nullable=True)
     resolved_by_id = Column(Integer, ForeignKey("users.id"), nullable=True)
-    resolved_at = Column(DateTime, nullable=True)
+    resolved_at = Column(DateTime(timezone=True), nullable=True)
     
     # Admin approval
     admin_approvals_required = Column(Integer, default=2)
@@ -63,8 +63,8 @@ class Dispute(Base):
     admin_approvers = Column(JSON, default=list)  # List of admin IDs who approved
     
     # Timestamps
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
     
     # Relationships
     order = relationship("Order", back_populates="dispute")

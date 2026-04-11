@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { useAuthStore } from "@/stores/auth-store";
 import { api } from "@/lib/api";
 
@@ -8,6 +8,11 @@ export default function VerifiedAccountPage() {
   const user = useAuthStore(state => state.user);
   const setUser = useAuthStore(state => state.setUser);
   const [allocating, setAllocating] = useState(false);
+  const [submittingKyc, setSubmittingKyc] = useState(false);
+  const docFileRef = useRef(null);
+  const selfieFileRef = useRef(null);
+  const [docFileData, setDocFileData] = useState(null);
+  const [selfieFileData, setSelfieFileData] = useState(null);
 
   
   const [profile, setProfile] = useState({
@@ -30,6 +35,18 @@ export default function VerifiedAccountPage() {
       }));
     }
   }, [user]);
+
+  const handleFileChange = async (event, setter) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    if (file.size > 10 * 1024 * 1024) {
+      alert("File must be less than 10MB");
+      return;
+    }
+    const reader = new FileReader();
+    reader.onload = (e) => setter(e.target.result);
+    reader.readAsDataURL(file);
+  };
 
   const handleAllocateAccount = async () => {
     if (user?.avok_account_number) {
@@ -138,11 +155,13 @@ export default function VerifiedAccountPage() {
             />
             <div className="sm:col-span-2">
               <label className="block text-sm font-medium text-stone-700 mb-1">Document Image *</label>
-              <input type="file" className="field" />
+              <input ref={docFileRef} type="file" className="field" accept="image/*" onChange={(e) => handleFileChange(e, setDocFileData)} />
+              {docFileData && <p className="text-xs text-emerald-600 mt-1">Document image selected</p>}
             </div>
             <div className="sm:col-span-2">
               <label className="block text-sm font-medium text-stone-700 mb-1">Selfie Image *</label>
-              <input type="file" className="field" />
+              <input ref={selfieFileRef} type="file" className="field" accept="image/*" onChange={(e) => handleFileChange(e, setSelfieFileData)} />
+              {selfieFileData && <p className="text-xs text-emerald-600 mt-1">Selfie image selected</p>}
             </div>
             <input
               className="field"
@@ -152,29 +171,36 @@ export default function VerifiedAccountPage() {
             />
           </div>
           <p className="text-xs text-stone-500 mt-2">* Required fields must be filled before submission</p>
-          <button type="button" className="btn-primary mt-5 w-full" onClick={async () => {
+          <button type="button" className="btn-primary mt-5 w-full" disabled={submittingKyc} onClick={async () => {
               if (!profile.document_number) {
                 alert("Please fill in all required fields:\n- Document Number\n- Document Image\n- Selfie Image");
                 return;
               }
+              if (!docFileData || !selfieFileData) {
+                alert("Please upload both Document Image and Selfie Image files.");
+                return;
+              }
               try {
+                  setSubmittingKyc(true);
                   await api.post("/auth/kyc", {
                       document_type: profile.document_type,
                       document_number: profile.document_number,
-                      document_image: "dummy_image_url",
-                      selfie_image: "dummy_selfie_url"
+                      document_image: docFileData,
+                      selfie_image: selfieFileData
                   });
                   
-                  // Refresh user data to get latest status
                   const { data: userData } = await api.get("/auth/me");
                   setUser(userData);
-                  
+                  setDocFileData(null);
+                  setSelfieFileData(null);
                   alert("KYC Submitted Successfully!\nYour Avok Account: " + userData.avok_account_number + "\n\nAdmins will review your verification.");
               } catch(e) {
                   alert(e.response?.data?.detail || e.message);
+              } finally {
+                  setSubmittingKyc(false);
               }
           }}>
-            Submit verification details
+            {submittingKyc ? "Submitting..." : "Submit verification details"}
           </button>
         </section>
 

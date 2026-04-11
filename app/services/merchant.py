@@ -2,7 +2,7 @@ import hashlib
 import hmac
 import json
 import secrets
-from datetime import datetime, timedelta
+from datetime import datetime, timezone, timedelta
 from typing import Dict, Optional
 from urllib.parse import urlparse
 
@@ -49,8 +49,15 @@ class MerchantService:
         signature: str,
         payload: MerchantIntentCreate,
         canonical_payload: Optional[str] = None,
+        provided_secret_key: Optional[str] = None,
     ) -> MerchantIntentResponse:
         merchant = await self.get_merchant(merchant_id)
+
+        # Verify merchant identity when the merchant chooses to send its secret explicitly.
+        if provided_secret_key:
+            if not hmac.compare_digest(provided_secret_key, merchant.secret_key):
+                raise ValidationError("Invalid merchant secret key")
+
         canonical_payload = canonical_payload or self._canonicalize_payload(payload.model_dump(mode="json", exclude_none=True))
         expected_signature = self.sign_payload(merchant.secret_key, canonical_payload)
         if not hmac.compare_digest(expected_signature, signature):
@@ -76,7 +83,7 @@ class MerchantService:
             raise ValidationError("product_price must match the sum of line items")
 
         intent_reference = f"avok_intent_{secrets.token_urlsafe(18)}"
-        expires_at = datetime.utcnow() + timedelta(minutes=payload.expires_in_minutes)
+        expires_at = datetime.now(timezone.utc) + timedelta(minutes=payload.expires_in_minutes)
         intent = MerchantCheckoutIntent(
             intent_reference=intent_reference,
             merchant_id=merchant.id,
@@ -113,7 +120,7 @@ class MerchantService:
 
     async def get_checkout_intent(self, intent_reference: str) -> MerchantIntentPayload:
         intent = await self._get_intent(intent_reference)
-        if intent.expires_at <= datetime.utcnow():
+        if self._ensure_utc(intent.expires_at) <= datetime.now(timezone.utc):
             raise ValidationError("Checkout intent has expired")
 
         items = [OrderItemCreate.model_validate(item) for item in (intent.items or [])]
@@ -147,7 +154,7 @@ class MerchantService:
             return raw_payload
 
         intent = await self._get_intent(merchant_intent_reference)
-        if intent.expires_at <= datetime.utcnow():
+        if self._ensure_utc(intent.expires_at) <= datetime.now(timezone.utc):
             raise ValidationError("Checkout intent has expired")
 
         items = intent.items or []
@@ -229,3 +236,9 @@ class MerchantService:
         }
         if normalized_value not in normalized_allowed:
             raise ValidationError(f"{field_name} is not allowed for this merchant")
+
+    @staticmethod
+    def _ensure_utc(value: datetime) -> datetime:
+        if value.tzinfo is None:
+            return value.replace(tzinfo=timezone.utc)
+        return value.astimezone(timezone.utc)

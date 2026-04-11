@@ -275,8 +275,32 @@ async def confirm_checkout_session(
     elif session.buyer_id != current_user.id:
         raise HTTPException(status_code=403, detail="Only the payer can confirm this checkout session")
 
-    await order_service.confirm_delivery_manually(session.id)
-    await escrow_service.release_funds_to_seller(session.id)
+    try:
+        # Check for open dispute before confirming delivery
+        from app.models.dispute import Dispute, DisputeStatus
+        from sqlalchemy import select as sa_select
+        dispute_check = await db.execute(
+            sa_select(Dispute).where(
+                Dispute.order_id == session.id,
+                Dispute.status.in_([DisputeStatus.PENDING, DisputeStatus.UNDER_REVIEW])
+            )
+        )
+        if dispute_check.scalar_one_or_none():
+            raise HTTPException(
+                status_code=400,
+                detail="Cannot confirm delivery while a dispute is open. Please resolve the dispute first."
+            )
+
+        await order_service.confirm_delivery_manually(session.id, commit=False)
+        await escrow_service.release_funds_to_seller(session.id)
+        await db.commit()
+    except HTTPException:
+        await db.rollback()
+        raise
+    except Exception:
+        await db.rollback()
+        raise
+
     return {"message": "Checkout session confirmed and escrow released"}
 
 

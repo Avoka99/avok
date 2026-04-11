@@ -1,7 +1,7 @@
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Optional, List
 from sqlalchemy import (
-    Column, String, Boolean, DateTime, Enum, Integer, Text, ForeignKey, Index, JSON
+    Column, String, Boolean, DateTime, Enum, Integer, Text, ForeignKey, Index, JSON, func
 )
 from sqlalchemy.orm import relationship
 import enum
@@ -52,12 +52,12 @@ class User(Base):
     
     # Verification
     is_phone_verified = Column(Boolean, default=False)
-    phone_verified_at = Column(DateTime, nullable=True)
+    phone_verified_at = Column(DateTime(timezone=True), nullable=True)
     
     # Security
-    last_login_at = Column(DateTime, nullable=True)
+    last_login_at = Column(DateTime(timezone=True), nullable=True)
     login_attempts = Column(Integer, default=0)
-    locked_until = Column(DateTime, nullable=True)
+    locked_until = Column(DateTime(timezone=True), nullable=True)
     
     # Fraud detection
     dispute_count = Column(Integer, default=0)
@@ -68,8 +68,8 @@ class User(Base):
     avok_account_number = Column(String(20), unique=True, nullable=True)
     
     # Timestamps
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
     
     # Relationships
     wallet = relationship("Wallet", back_populates="user", uselist=False)

@@ -1,6 +1,6 @@
-from datetime import datetime, timedelta
+from datetime import datetime, timezone, timedelta
 
-from sqlalchemy import Column, DateTime, ForeignKey, Integer, String, Index
+from sqlalchemy import func, Column, DateTime, ForeignKey, Integer, String, Index
 from sqlalchemy.orm import relationship
 
 from app.core.database import Base
@@ -13,10 +13,10 @@ class GuestCheckoutSession(Base):
     phone_number = Column(String(20), nullable=False, index=True)
     full_name = Column(String(255), nullable=False)
     email = Column(String(255), nullable=True, index=True)
-    expires_at = Column(DateTime, nullable=False, default=lambda: datetime.utcnow() + timedelta(hours=24))
+    expires_at = Column(DateTime(timezone=True), nullable=False, default=lambda: datetime.now(timezone.utc) + timedelta(hours=24))
     converted_user_id = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
     converted_user = relationship("User")
     orders = relationship("Order", back_populates="guest_checkout_session")
@@ -28,4 +28,6 @@ class GuestCheckoutSession(Base):
 
     @property
     def is_expired(self) -> bool:
-        return datetime.utcnow() >= self.expires_at
+        if self.expires_at.tzinfo is None:
+            return datetime.utcnow() >= self.expires_at
+        return datetime.now(timezone.utc) >= self.expires_at

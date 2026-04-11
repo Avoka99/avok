@@ -1,5 +1,6 @@
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
+from typing import Optional
 import json
 import logging
 from pydantic import ValidationError as PydanticValidationError
@@ -33,6 +34,7 @@ async def create_checkout_intent(
     request: Request,
     merchant_id: str = Header(..., alias="X-Avok-Merchant-Id"),
     merchant_signature: str = Header(..., alias="X-Avok-Signature"),
+    merchant_secret: Optional[str] = Header(None, alias="X-Avok-Merchant-Secret"),
     db: AsyncSession = Depends(get_db),
 ):
     """
@@ -45,14 +47,14 @@ async def create_checkout_intent(
         payload_data = json.loads(raw_body.decode("utf-8"))
         intent_data = MerchantIntentCreate.model_validate(payload_data)
         
-        # We pass the raw payload string for canonical signature verification
         canonical_payload = MerchantService._canonicalize_payload(payload_data)
         
         return await service.create_checkout_intent(
             merchant_id=merchant_id,
             signature=merchant_signature,
             payload=intent_data,
-            canonical_payload=canonical_payload
+            canonical_payload=canonical_payload,
+            provided_secret_key=merchant_secret,
         )
     except json.JSONDecodeError:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid JSON body")

@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta
+from datetime import datetime, timezone, timedelta
 from typing import Optional, List, Dict
 import logging
 import uuid
@@ -88,17 +88,6 @@ class OrderService:
                 raise ValidationError("Guest checkout session has expired. Please start a new checkout or register.")
         else:
             raise ValidationError("A payer account or guest checkout session is required")
-
-        recipient = None
-        if recipient_id is not None:
-            recipient = await self._get_user(recipient_id)
-            if recipient.status != UserStatus.ACTIVE:
-                raise ValidationError("Recipient account is not active")
-            recipient_display_name = recipient.full_name
-            recipient_contact = recipient.phone_number
-            payout_destination = "avok_account"
-            payout_reference = str(recipient.id)
-            payout_account_name = recipient.full_name
 
         recipient = None
         if recipient_id is not None:
@@ -227,7 +216,7 @@ class OrderService:
                     "risk_score": risk_score,
                     "flags": flags,
                     "review_status": "pending",
-                    "flagged_at": datetime.utcnow().isoformat()
+                    "flagged_at": datetime.now(timezone.utc).isoformat()
                 }
                 order_requires_review = True
                 logger.warning(f"High-risk order flagged for review: {order_reference}, risk_score: {risk_score}, flags: {flags}")
@@ -278,6 +267,77 @@ class OrderService:
 
         await self.db.commit()
         logger.info(f"Order enrichment complete for {order.order_reference}")
+
+    async def mark_order_as_shipped(self, order_id: int, seller_id: int, tracking_number: Optional[str] = None) -> Order:
+        """Move an escrow session into shipment and start its auto-release window."""
+        order = await self.get_order_by_id(order_id)
+
+        if order.seller_id != seller_id:
+            raise PermissionDeniedError("Only the registered recipient can mark this checkout session as shipped")
+        if order.escrow_status not in {OrderStatus.PAYMENT_CONFIRMED, OrderStatus.PROCESSING}:
+            raise ValidationError(f"Cannot mark order as shipped from status {order.escrow_status}")
+
+        order.escrow_status = OrderStatus.SHIPPED
+        order.tracking_number = tracking_number
+        order.start_auto_release_window(settings.escrow_release_days)
+
+        await self.db.commit()
+        await self.db.refresh(order)
+        return order
+
+    async def generate_delivery_otp(self, order_id: int) -> str:
+        """Generate or refresh the OTP used for a monitored handover."""
+        order = await self.get_order_by_id(order_id)
+
+        if order.seller_id is None:
+            raise ValidationError("Only registered recipients can generate delivery OTP")
+        if order.escrow_status not in {OrderStatus.PAYMENT_CONFIRMED, OrderStatus.PROCESSING, OrderStatus.SHIPPED}:
+            raise ValidationError(f"Cannot generate delivery OTP for status {order.escrow_status}")
+
+        if order.escrow_status != OrderStatus.SHIPPED:
+            order.escrow_status = OrderStatus.SHIPPED
+            order.start_auto_release_window(settings.escrow_release_days)
+
+        otp_code = generate_otp()
+        expires_at = datetime.now(timezone.utc) + timedelta(minutes=15)
+
+        if order.otp_delivery:
+            order.otp_delivery.otp_code = otp_code
+            order.otp_delivery.expires_at = expires_at
+            order.otp_delivery.is_verified = False
+            order.otp_delivery.verified_at = None
+            order.otp_delivery.verified_by_id = None
+            order.otp_delivery.attempts = 0
+        else:
+            self.db.add(
+                OTPDelivery(
+                    order_id=order.id,
+                    otp_code=otp_code,
+                    expires_at=expires_at,
+                )
+            )
+
+        await self.db.commit()
+        refreshed_order = await self.get_order_by_id(order.id)
+        await self.notification_service.send_delivery_otp(refreshed_order, otp_code)
+        return otp_code
+
+    async def confirm_delivery_manually(self, order_id: int, commit: bool = True) -> Order:
+        """Allow the payer to confirm delivery when escrow is already in the delivery phase."""
+        order = await self.get_order_by_id(order_id)
+
+        if order.escrow_status not in {OrderStatus.SHIPPED, OrderStatus.DELIVERED}:
+            raise ValidationError(f"Cannot confirm delivery for order in status: {order.escrow_status}")
+
+        order.escrow_status = OrderStatus.DELIVERED
+        order.delivered_at = datetime.now(timezone.utc)
+        if not order.escrow_release_date:
+            order.start_auto_release_window(settings.escrow_release_days)
+
+        if commit:
+            await self.db.commit()
+            await self.db.refresh(order)
+        return order
     
     async def get_order(self, order_reference: str) -> Order:
         """
@@ -431,328 +491,6 @@ class OrderService:
         result = await self.db.execute(query)
         return result.scalars().all()
     
-    async def update_order_status(
-        self,
-        order_id: int,
-        new_status: OrderStatus,
-        user_id: int,
-        reason: Optional[str] = None
-    ) -> Order:
-        """
-        Update order status with validation.
-        
-        Args:
-            order_id: Order ID
-            new_status: New status to set
-            user_id: User performing the update
-            reason: Optional reason for status change
-            
-        Returns:
-            Updated order
-        """
-        order = await self.get_order_by_id(order_id)
-        
-        # Validate status transition
-        valid_transitions = self._get_valid_status_transitions(order.escrow_status)
-        
-        if new_status not in valid_transitions:
-            raise ValidationError(
-                f"Cannot transition from {order.escrow_status} to {new_status}"
-            )
-        
-        # Check permissions
-        await self._check_status_update_permission(order, user_id, new_status)
-        
-        # Update status
-        old_status = order.escrow_status
-        order.escrow_status = new_status
-        
-        # Update timestamps based on status
-        if new_status == OrderStatus.DELIVERED:
-            order.delivered_at = datetime.utcnow()
-        elif new_status == OrderStatus.COMPLETED:
-            order.completed_at = datetime.utcnow()
-        elif new_status == OrderStatus.CANCELLED:
-            order.completed_at = datetime.utcnow()
-        
-        await self.db.commit()
-        
-        logger.info(f"Order {order.order_reference} status updated: {old_status} -> {new_status}")
-        
-        return order
-    
-    async def generate_delivery_otp(self, order_id: int) -> str:
-        """
-        Generate OTP for delivery confirmation.
-        
-        Args:
-            order_id: Order ID
-            
-        Returns:
-            Generated OTP code
-        """
-        order = await self.get_order_by_id(order_id)
-        
-        # Only seller can generate OTP
-        if order.escrow_status not in [OrderStatus.PAYMENT_CONFIRMED, OrderStatus.PROCESSING, OrderStatus.SHIPPED]:
-            raise ValidationError(f"Cannot generate OTP for order in status: {order.escrow_status}")
-        
-        # Check if OTP already exists and not expired
-        result = await self.db.execute(
-            select(OTPDelivery).where(OTPDelivery.order_id == order_id)
-        )
-        existing_otp = result.scalar_one_or_none()
-        
-        if existing_otp and not existing_otp.is_expired() and not existing_otp.is_verified:
-            # Reuse existing valid OTP
-            otp_code = existing_otp.otp_code
-            if order.escrow_status == OrderStatus.PAYMENT_CONFIRMED:
-                order.escrow_status = OrderStatus.SHIPPED
-                order.start_auto_release_window(settings.escrow_release_days)
-                await self.db.commit()
-            logger.info(f"Reusing existing OTP for order {order.order_reference}")
-        else:
-            # Generate new OTP
-            otp_code = generate_otp()
-            
-            # Delete old OTP if exists
-            if existing_otp:
-                await self.db.delete(existing_otp)
-            
-            # Create new OTP
-            otp_delivery = OTPDelivery(
-                order_id=order_id,
-                otp_code=otp_code,
-                expires_at=datetime.utcnow() + timedelta(hours=24),  # Valid for 24 hours
-                max_attempts=5
-            )
-            self.db.add(otp_delivery)
-            
-            # Delivery-phase countdown starts only after the recipient actually ships.
-            if order.escrow_status in {OrderStatus.PAYMENT_CONFIRMED, OrderStatus.PROCESSING}:
-                order.escrow_status = OrderStatus.SHIPPED
-            order.start_auto_release_window(settings.escrow_release_days)
-            
-            await self.db.commit()
-            logger.info(f"Generated new OTP for order {order.order_reference}")
-        
-        # Send OTP to buyer via SMS and email
-        await self.notification_service.send_delivery_otp(order, otp_code)
-        
-        return otp_code
-    
-    async def confirm_delivery_manually(self, order_id: int) -> Order:
-        """
-        Manually confirm delivery (buyer confirms receipt).
-        
-        Args:
-            order_id: Order ID
-            
-        Returns:
-            Updated order
-        """
-        order = await self.get_order_by_id(order_id)
-        
-        if order.escrow_status != OrderStatus.SHIPPED:
-            raise ValidationError(f"Cannot confirm delivery for order in status: {order.escrow_status}")
-        
-        # Update order
-        order.escrow_status = OrderStatus.DELIVERED
-        order.delivered_at = datetime.utcnow()
-        if order.escrow_release_date is None:
-            order.start_auto_release_window(settings.escrow_release_days)
-        
-        await self.db.commit()
-        
-        logger.info(f"Delivery manually confirmed for order {order.order_reference}")
-        
-        return order
-    
-    async def cancel_order(
-        self,
-        order_id: int,
-        user_id: int,
-        reason: str
-    ) -> Order:
-        """
-        Cancel an order before payment or during dispute.
-        
-        Args:
-            order_id: Order ID
-            user_id: User requesting cancellation
-            reason: Reason for cancellation
-            
-        Returns:
-            Updated order
-        """
-        order = await self.get_order_by_id(order_id)
-        
-        # Check if order can be cancelled
-        cancellable_statuses = [
-            OrderStatus.PENDING_PAYMENT,
-            OrderStatus.DISPUTED
-        ]
-        
-        if order.escrow_status not in cancellable_statuses:
-            raise ValidationError(f"Cannot cancel order in status: {order.escrow_status}")
-        
-        # Check permissions
-        if user_id not in [order.buyer_id, order.seller_id]:
-            # Only admins can cancel other people's orders
-            user = await self._get_user(user_id)
-            if user.role not in [UserRole.ADMIN, UserRole.SUPER_ADMIN]:
-                raise PermissionDeniedError("Only buyer, seller, or admin can cancel orders")
-        
-        # Update order
-        order.escrow_status = OrderStatus.CANCELLED
-        order.completed_at = datetime.utcnow()
-        
-        await self.db.commit()
-        
-        logger.info(f"Order {order.order_reference} cancelled by user {user_id}: {reason}")
-        
-        # Send notification
-        await self._notify_cancellation(order, reason)
-        
-        return order
-    
-    async def mark_order_as_shipped(
-        self,
-        order_id: int,
-        seller_id: int,
-        tracking_number: Optional[str] = None
-    ) -> Order:
-        """
-        Mark order as shipped (seller action).
-        
-        Args:
-            order_id: Order ID
-            seller_id: Seller ID
-            tracking_number: Optional tracking number
-            
-        Returns:
-            Updated order
-        """
-        order = await self.get_order_by_id(order_id)
-        
-        # Verify seller
-        if order.seller_id != seller_id:
-            raise PermissionDeniedError("Only the seller can mark order as shipped")
-        
-        # Check if order can be shipped
-        if order.escrow_status not in {OrderStatus.PAYMENT_CONFIRMED, OrderStatus.PROCESSING}:
-            raise ValidationError(f"Cannot ship order in status: {order.escrow_status}")
-        
-        # Update order
-        order.escrow_status = OrderStatus.SHIPPED
-        order.start_auto_release_window(settings.escrow_release_days)
-        if tracking_number:
-            order.tracking_number = tracking_number
-        
-        await self.db.commit()
-        
-        logger.info(f"Order {order.order_reference} marked as shipped")
-        
-        # Send notification to buyer
-        await self.notification_service.send_sms(
-            order.buyer.phone_number,
-            f"Your order {order.order_reference} has been shipped. You'll receive an OTP for delivery confirmation."
-        )
-        
-        # Generate OTP for delivery
-        await self.generate_delivery_otp(order_id)
-        
-        return order
-    
-    async def get_order_statistics(self, user_id: int) -> Dict:
-        '''Get order statistics for a user.'''
-        buyer_stats_query = select(
-            Order.escrow_status,
-            func.count(Order.id).label('count'),
-            func.sum(Order.total_amount).label('spent')
-        ).where(Order.buyer_id == user_id).group_by(Order.escrow_status)
-        
-        buyer_result = await self.db.execute(buyer_stats_query)
-        buyer_rows = buyer_result.all()
-        
-        buyer_stats = {
-            "total": 0, "pending_payment": 0, "in_escrow": 0, "delivered": 0,
-            "completed": 0, "disputed": 0, "cancelled": 0, "total_spent": 0.0
-        }
-        for status, count, spent in buyer_rows:
-            buyer_stats["total"] += count
-            if status == OrderStatus.PENDING_PAYMENT: buyer_stats["pending_payment"] = count
-            elif status == OrderStatus.PAYMENT_CONFIRMED: buyer_stats["in_escrow"] = count
-            elif status == OrderStatus.DELIVERED: buyer_stats["delivered"] = count
-            elif status == OrderStatus.COMPLETED: 
-                buyer_stats["completed"] = count
-                buyer_stats["total_spent"] = float(spent or 0.0)
-            elif status == OrderStatus.DISPUTED: buyer_stats["disputed"] = count
-            elif status == OrderStatus.CANCELLED: buyer_stats["cancelled"] = count
-
-        seller_stats_query = select(
-            Order.escrow_status,
-            func.count(Order.id).label('count'),
-            func.sum(Order.product_price).label('earned')
-        ).where(Order.seller_id == user_id).group_by(Order.escrow_status)
-        
-        seller_result = await self.db.execute(seller_stats_query)
-        seller_rows = seller_result.all()
-
-        seller_stats = {
-            "total": 0, "pending_payment": 0, "in_escrow": 0, "shipped": 0,
-            "completed": 0, "disputed": 0, "cancelled": 0, "total_earned": 0.0
-        }
-        for status, count, earned in seller_rows:
-            seller_stats["total"] += count
-            if status == OrderStatus.PENDING_PAYMENT: seller_stats["pending_payment"] = count
-            elif status == OrderStatus.PAYMENT_CONFIRMED: seller_stats["in_escrow"] = count
-            elif status == OrderStatus.SHIPPED: seller_stats["shipped"] = count
-            elif status == OrderStatus.COMPLETED: 
-                seller_stats["completed"] = count
-                seller_stats["total_earned"] = float(earned or 0.0)
-            elif status == OrderStatus.DISPUTED: seller_stats["disputed"] = count
-            elif status == OrderStatus.CANCELLED: seller_stats["cancelled"] = count
-        
-        return {
-            "as_buyer": buyer_stats,
-            "as_seller": seller_stats
-        }
-
-    async def search_orders(
-        self,
-        query: str,
-        skip: int = 0,
-        limit: int = 20
-    ) -> List[Order]:
-        """
-        Search orders by product name or reference.
-        
-        Args:
-            query: Search query string
-            skip: Number of records to skip
-            limit: Maximum records to return
-            
-        Returns:
-            List of matching orders
-        """
-        search_term = f"%{query}%"
-        
-        result = await self.db.execute(
-            select(Order)
-            .where(
-                or_(
-                    Order.order_reference.ilike(search_term),
-                    Order.product_name.ilike(search_term)
-                )
-            )
-            .order_by(desc(Order.created_at))
-            .offset(skip)
-            .limit(limit)
-        )
-        
-        return result.scalars().all()
-    
     async def get_expiring_orders(self, days_threshold: int = 3) -> List[Order]:
         """
         Get orders that will auto-release soon.
@@ -763,7 +501,7 @@ class OrderService:
         Returns:
             List of orders expiring soon
         """
-        threshold_date = datetime.utcnow() + timedelta(days=days_threshold)
+        threshold_date = datetime.now(timezone.utc) + timedelta(days=days_threshold)
         
         result = await self.db.execute(
             select(Order)
@@ -771,7 +509,7 @@ class OrderService:
                 and_(
                     Order.escrow_status.in_([OrderStatus.SHIPPED, OrderStatus.DELIVERED]),
                     Order.escrow_release_date <= threshold_date,
-                    Order.escrow_release_date > datetime.utcnow()
+                    Order.escrow_release_date > datetime.now(timezone.utc)
                 )
             )
         )
@@ -813,19 +551,25 @@ class OrderService:
         if order.buyer_id is not None:
             recent_orders = await self.get_buyer_orders(
                 order.buyer_id,
-                limit=10
+                limit=max(settings.fraud_max_orders_per_day + 1, 10)
             )
-            if len(recent_orders) > 5:
-                time_diff = (datetime.utcnow() - recent_orders[0].created_at).total_seconds() / 3600
-                if time_diff < 24:
-                    flags.append("rapid_ordering")
-                    risk_score += 15
+            recent_orders_24h = [
+                candidate
+                for candidate in recent_orders
+                if (datetime.now(timezone.utc) - self._ensure_utc(candidate.created_at)).total_seconds() < 24 * 3600
+            ]
+            if len(recent_orders_24h) > settings.fraud_max_orders_per_day:
+                flags.append("daily_order_velocity")
+                risk_score += 20
+            elif len(recent_orders_24h) > 3:
+                flags.append("rapid_ordering")
+                risk_score += 15
         
         return {
             "is_suspicious": risk_score > settings.fraud_low_risk_threshold,
             "risk_score": risk_score,
             "flags": flags,
-            "timestamp": datetime.utcnow().isoformat()
+            "timestamp": datetime.now(timezone.utc).isoformat()
         }
     
     async def _check_status_update_permission(
@@ -893,7 +637,7 @@ class OrderService:
     
     def _generate_order_reference(self) -> str:
         """Generate unique order reference."""
-        timestamp = datetime.utcnow().strftime("%Y%m%d%H%M%S")
+        timestamp = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
         random_part = secrets.token_hex(4).upper()
         return f"AVOK-{timestamp}-{random_part}"
     
@@ -952,6 +696,12 @@ class OrderService:
         if not guest_checkout_session:
             raise NotFoundError("Guest checkout session", session_id)
         return guest_checkout_session
+
+    @staticmethod
+    def _ensure_utc(value: datetime) -> datetime:
+        if value.tzinfo is None:
+            return value.replace(tzinfo=timezone.utc)
+        return value.astimezone(timezone.utc)
 
     def _get_recipient_contact(self, order: Order) -> Dict[str, Optional[str]]:
         if order.seller:

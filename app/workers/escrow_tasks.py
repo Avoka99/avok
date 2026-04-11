@@ -1,6 +1,6 @@
 from celery import Task
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timezone, timedelta
 
 from app.core.database import get_db_context
 from app.workers.celery_app import celery_app
@@ -11,11 +11,6 @@ logger = logging.getLogger(__name__)
 class EscrowTask(Task):
     """Base task with database session."""
     _db = None
-    
-    def after_return(self, status, retval, task_id, args, kwargs, einfo):
-        """Cleanup after task."""
-        if self._db:
-            pass
 
 
 @celery_app.task(base=EscrowTask, bind=True)
@@ -40,7 +35,7 @@ def schedule_escrow_release(self, order_id: int):
             if order and order.can_auto_release():
                 if order.escrow_status == OrderStatus.SHIPPED:
                     order.escrow_status = OrderStatus.DELIVERED
-                    order.delivered_at = datetime.utcnow()
+                    order.delivered_at = datetime.now(timezone.utc)
                     await db.commit()
                 await escrow_service.release_funds_to_seller(order_id)
                 logger.info(f"Auto-released funds for order {order_id}")
@@ -74,7 +69,7 @@ def auto_release_expired_escrow(self):
                     and_(
                         Order.escrow_status.in_([OrderStatus.SHIPPED, OrderStatus.DELIVERED]),
                         Order.escrow_release_date.isnot(None),
-                        Order.escrow_release_date <= datetime.utcnow(),
+                        Order.escrow_release_date <= datetime.now(timezone.utc),
                         Order.escrow_account_active == True
                     )
                 )
@@ -89,7 +84,7 @@ def auto_release_expired_escrow(self):
                 try:
                     if order.escrow_status == OrderStatus.SHIPPED:
                         order.escrow_status = OrderStatus.DELIVERED
-                        order.delivered_at = datetime.utcnow()
+                        order.delivered_at = datetime.now(timezone.utc)
                         await db.commit()
                     
                     await escrow_service.release_funds_to_seller(order.id)
@@ -149,7 +144,7 @@ def cleanup_failed_transactions(self):
         async with get_db_context() as db:
             from sqlalchemy import select, and_
             
-            cutoff = datetime.utcnow() - timedelta(days=7)
+            cutoff = datetime.now(timezone.utc) - timedelta(days=7)
             
             result = await db.execute(
                 select(Transaction).where(

@@ -20,6 +20,16 @@ function formatChannel(value) {
   return String(value || "in_app").replaceAll("_", " ");
 }
 
+function statusColor(status) {
+  const colors = {
+    sent: "bg-emerald-100 text-emerald-700",
+    delivered: "bg-blue-100 text-blue-700",
+    pending: "bg-amber-100 text-amber-700",
+    failed: "bg-rose-100 text-rose-700",
+  };
+  return colors[String(status || "").toLowerCase()] || "bg-stone-100 text-stone-700";
+}
+
 export default function NotificationsPage() {
   const notificationsQuery = useQuery({
     queryKey: ["notifications"],
@@ -69,7 +79,7 @@ export default function NotificationsPage() {
               <div>
                 <div className="flex flex-wrap items-center gap-2 text-xs font-semibold uppercase tracking-[0.14em] text-stone-500">
                   <span>{formatChannel(notification.notification_type)}</span>
-                  <span className="rounded-full bg-stone-100 px-2 py-1 text-[11px] tracking-[0.12em] text-stone-700">
+                  <span className={`rounded-full px-2 py-1 text-[11px] tracking-[0.12em] ${statusColor(notification.status)}`}>
                     {notification.status}
                   </span>
                 </div>

@@ -36,11 +36,6 @@ async def get_db_context() -> AsyncGenerator[AsyncSession, None]:
             await session.close()
 
 
-def get_db_session() -> AsyncGenerator[AsyncSession, None]:
-    """Backward-compatible alias for older dependency imports."""
-    return get_db()
-
-
 async def init_db() -> None:
     """Initialize database tables."""
     import app.models  # noqa: F401

@@ -7,8 +7,9 @@ import { api } from "@/lib/api";
 export default function SuperAdminPage() {
   const user = useAuthStore(state => state.user);
   const [adminPhone, setAdminPhone] = useState("");
+  const canAccess = Boolean(user && (user.role === "super_admin" || user.is_superuser));
 
-  if (!user || (user.role !== 'super_admin' && !user.is_superuser)) {
+  if (!canAccess) {
       return <div className="p-10 text-center text-rose-600 font-bold">Unauthorized: This area requires Super Admin privileges.</div>;
   }
 

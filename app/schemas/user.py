@@ -76,6 +76,10 @@ class Token(BaseModel):
     token_type: str = "bearer"
 
 
+class RefreshTokenRequest(BaseModel):
+    refresh_token: str
+
+
 class TokenData(BaseModel):
     user_id: Optional[int] = None
     role: Optional[UserRole] = None

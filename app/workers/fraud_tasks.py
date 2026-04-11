@@ -1,6 +1,6 @@
 import logging
 import asyncio
-from datetime import datetime, timedelta
+from datetime import datetime, timezone, timedelta
 
 from app.core.database import get_db_context
 from app.services.fraud_detection import FraudDetectionService
@@ -65,7 +65,7 @@ def analyze_suspicious_activity(self):
             from app.models.wallet import Wallet
             from sqlalchemy import select, func, and_
             
-            cutoff = datetime.utcnow() - timedelta(hours=1)
+            cutoff = datetime.now(timezone.utc) - timedelta(hours=1)
             
             result = await db.execute(
                 select(

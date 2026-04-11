@@ -1,7 +1,7 @@
-from datetime import datetime, timedelta
+from datetime import datetime, timezone, timedelta
 from typing import Optional
 from sqlalchemy import (
-    Column, Integer, String, Float, DateTime, ForeignKey, Enum, Text, Boolean, Index, JSON
+    Column, Integer, String, Float, DateTime, ForeignKey, Enum, Text, Boolean, Index, JSON, func
 )
 from sqlalchemy.orm import relationship
 import enum
@@ -65,26 +65,26 @@ class Order(Base):
     
     # Escrow
     escrow_status = Column(Enum(OrderStatus), default=OrderStatus.PENDING_PAYMENT, nullable=False)
-    escrow_release_date = Column(DateTime, nullable=True)  # Auto-release after 14 days
-    escrow_held_at = Column(DateTime, nullable=True)
+    escrow_release_date = Column(DateTime(timezone=True), nullable=True)  # Auto-release after 14 days
+    escrow_held_at = Column(DateTime(timezone=True), nullable=True)
     escrow_account_active = Column(Boolean, default=True, nullable=False)
-    escrow_closed_at = Column(DateTime, nullable=True)
+    escrow_closed_at = Column(DateTime(timezone=True), nullable=True)
     
     # Delivery
     delivery_method = Column(Enum(DeliveryMethod), nullable=False)
     shipping_address = Column(Text, nullable=True)
     tracking_number = Column(String(255), nullable=True)
-    delivered_at = Column(DateTime, nullable=True)
+    delivered_at = Column(DateTime(timezone=True), nullable=True)
     
     # OTP confirmation
     delivery_otp = Column(String(6), nullable=True)
-    otp_verified_at = Column(DateTime, nullable=True)
+    otp_verified_at = Column(DateTime(timezone=True), nullable=True)
     otp_attempts = Column(Integer, default=0)
     
     # Timestamps
-    created_at = Column(DateTime, default=datetime.utcnow, nullable=False)
-    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
-    completed_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+    completed_at = Column(DateTime(timezone=True), nullable=True)
     
     # Relationships
     buyer = relationship("User", foreign_keys=[buyer_id], back_populates="orders_as_buyer")
@@ -101,25 +101,35 @@ class Order(Base):
         Index("ix_orders_seller_status", "seller_id", "escrow_status"),
         Index("ix_orders_escrow_release", "escrow_release_date"),
     )
+
+    @staticmethod
+    def _ensure_utc(value: Optional[datetime]) -> Optional[datetime]:
+        if value is None:
+            return None
+        if value.tzinfo is None:
+            return value.replace(tzinfo=timezone.utc)
+        return value.astimezone(timezone.utc)
     
     def can_auto_release(self) -> bool:
         """Check if order is eligible for auto-release."""
-        if not self.escrow_account_active or not self.escrow_release_date:
+        release_date = self._ensure_utc(self.escrow_release_date)
+        if not self.escrow_account_active or not release_date:
             return False
         if self.escrow_status not in {OrderStatus.SHIPPED, OrderStatus.DELIVERED}:
             return False
-        return datetime.utcnow() >= self.escrow_release_date
+        return datetime.now(timezone.utc) >= release_date
 
     def start_auto_release_window(self, release_days: int) -> datetime:
         """Start or refresh the escrow auto-release countdown from the delivery phase."""
-        self.escrow_release_date = datetime.utcnow() + timedelta(days=release_days)
+        self.escrow_release_date = datetime.now(timezone.utc) + timedelta(days=release_days)
         return self.escrow_release_date
     
     def days_until_auto_release(self) -> Optional[int]:
         """Get days remaining until auto-release."""
-        if not self.escrow_release_date:
+        release_date = self._ensure_utc(self.escrow_release_date)
+        if not release_date:
             return None
-        remaining = (self.escrow_release_date - datetime.utcnow()).days
+        remaining = (release_date - datetime.now(timezone.utc)).days
         return max(0, remaining)
     
     def __repr__(self):

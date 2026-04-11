@@ -73,6 +73,7 @@ class Settings(BaseSettings):
     fraud_new_account_days: int = Field(default=7, env="FRAUD_NEW_ACCOUNT_DAYS")
     fraud_auto_flag_threshold: int = Field(default=80, env="FRAUD_AUTO_FLAG_THRESHOLD")
     fraud_completion_rate_threshold: float = Field(default=0.5, env="FRAUD_COMPLETION_RATE_THRESHOLD")
+    fraud_max_orders_per_day: int = Field(default=5, env="FRAUD_MAX_ORDERS_PER_DAY")
     
     # Security
     allowed_origins: List[str] = Field(default=["*"], env="ALLOWED_ORIGINS")
@@ -89,6 +90,34 @@ class Settings(BaseSettings):
     mtn_momo_api_key: Optional[str] = Field(default=None, env="MTN_MOMO_API_KEY")
     mtn_momo_target_environment: str = Field(default="sandbox", env="MTN_MOMO_TARGET_ENVIRONMENT")
     mtn_momo_currency: str = Field(default="EUR", env="MTN_MOMO_CURRENCY")
+    
+    # MTN MoMo Disbursement (payout to users — separate API from Collection)
+    mtn_momo_disbursement_base_url: Optional[str] = Field(default=None, env="MTN_MOMO_DISBURSEMENT_BASE_URL")
+    mtn_momo_disbursement_subscription_key: Optional[str] = Field(default=None, env="MTN_MOMO_DISBURSEMENT_SUBSCRIPTION_KEY")
+    mtn_momo_disbursement_api_user: Optional[str] = Field(default=None, env="MTN_MOMO_DISBURSEMENT_API_USER")
+    mtn_momo_disbursement_api_key: Optional[str] = Field(default=None, env="MTN_MOMO_DISBURSEMENT_API_KEY")
+    
+    # Wallet payout simulation (set true to simulate payouts without real provider)
+    wallet_payout_simulate: bool = Field(default=False, env="WALLET_PAYOUT_SIMULATE")
+    
+    # Telecel Cash (optional)
+    telecel_base_url: Optional[str] = Field(default=None, env="TELECEL_BASE_URL")
+    telecel_api_key: Optional[str] = Field(default=None, env="TELECEL_API_KEY")
+    telecel_api_secret: Optional[str] = Field(default=None, env="TELECEL_API_SECRET")
+    
+    # AirtelTigo Money (optional)
+    airteltigo_base_url: Optional[str] = Field(default=None, env="AIRTELTIGO_BASE_URL")
+    airteltigo_api_key: Optional[str] = Field(default=None, env="AIRTELTIGO_API_KEY")
+    airteltigo_api_secret: Optional[str] = Field(default=None, env="AIRTELTIGO_API_SECRET")
+    
+    # Direct Bank Integration via Sponsor Bank (GhIPSS)
+    sponsor_bank_api_url: Optional[str] = Field(default=None, env="SPONSOR_BANK_API_URL")
+    sponsor_bank_api_key: Optional[str] = Field(default=None, env="SPONSOR_BANK_API_KEY")
+    sponsor_bank_api_secret: Optional[str] = Field(default=None, env="SPONSOR_BANK_API_SECRET")
+    avok_settlement_account: Optional[str] = Field(default=None, env="AVOK_SETTLEMENT_ACCOUNT")
+    avok_virtual_account: Optional[str] = Field(default=None, env="AVOK_VIRTUAL_ACCOUNT")
+    bank_collection_method: str = Field(default="virtual_account", env="BANK_COLLECTION_METHOD")
+    bank_disbursement_method: str = Field(default="ghipss", env="BANK_DISBURSEMENT_METHOD")
     
     model_config = SettingsConfigDict(
         env_file=".env",

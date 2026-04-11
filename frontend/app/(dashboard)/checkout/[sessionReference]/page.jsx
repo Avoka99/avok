@@ -124,7 +124,7 @@ export default function CheckoutDetailPage() {
 
   const recipientOtpMutation = useMutation({
     mutationFn: async () => {
-      const response = await api.post(`/orders/${orderReference}/delivery/otp`);
+      const response = await api.post(`/checkout/sessions/${orderReference}/delivery/otp`);
       return response.data;
     },
     onSuccess: async () => {
@@ -134,8 +134,7 @@ export default function CheckoutDetailPage() {
 
   const recipientConfirmMutation = useMutation({
     mutationFn: async (enteredOtp) => {
-      const response = await api.post(`/orders/${orderReference}/delivery/confirm`, {
-        order_reference: orderReference,
+      const response = await api.post(`/checkout/sessions/${orderReference}/delivery/confirm`, {
         otp: enteredOtp
       });
       return response.data;

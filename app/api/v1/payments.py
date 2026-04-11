@@ -26,6 +26,47 @@ router = APIRouter(prefix="/payments", tags=["payments"])
 SandboxGuard = Annotated[None, Depends(require_payment_sandbox_enabled)]
 
 
+@router.post("/merchants", response_model=MerchantResponse)
+async def create_merchant(
+    merchant_data: MerchantCreate,
+    current_admin: User = Depends(get_current_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    service = MerchantService(db)
+    try:
+        merchant = await service.create_merchant(merchant_data)
+    except ValidationError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=exc.message)
+    return merchant
+
+
+@router.post("/embed/intents", response_model=MerchantIntentResponse)
+async def create_embed_intent(
+    request: Request,
+    intent_data: MerchantIntentCreate,
+    merchant_id: str = Header(..., alias="X-Avok-Merchant-Id"),
+    signature: str = Header(..., alias="X-Avok-Signature"),
+    merchant_secret: str | None = Header(default=None, alias="X-Avok-Merchant-Secret"),
+    db: AsyncSession = Depends(get_db),
+):
+    service = MerchantService(db)
+    try:
+        canonical_payload = MerchantService._canonicalize_payload(
+            json.loads((await request.body()).decode("utf-8"))
+        )
+        return await service.create_checkout_intent(
+            merchant_id=merchant_id,
+            signature=signature,
+            payload=intent_data,
+            canonical_payload=canonical_payload,
+            provided_secret_key=merchant_secret,
+        )
+    except ValidationError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=exc.message)
+    except NotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=exc.message)
+
+
 @router.get("/embed/intents/{intent_reference}", response_model=MerchantIntentPayload)
 async def get_embed_intent(
     intent_reference: str,
@@ -81,6 +122,7 @@ async def payment_callback(request: Request, db: AsyncSession = Depends(get_db))
 
     Send header ``X-Avok-Webhook-Secret`` matching ``PAYMENT_WEBHOOK_SECRET``, or
     ``X-Avok-Webhook-Signature: sha256=<hmac>`` where HMAC is SHA256(secret, raw body).
+    Supports idempotency via ``X-Avok-Idempotency-Key`` header.
     """
     raw = await request.body()
     verify_payment_webhook(
@@ -89,6 +131,17 @@ async def payment_callback(request: Request, db: AsyncSession = Depends(get_db))
         webhook_secret=settings.payment_webhook_secret,
         debug=settings.debug,
     )
+
+    # Idempotency check via header
+    idempotency_key = request.headers.get("X-Avok-Idempotency-Key")
+    if idempotency_key:
+        from app.core.redis_client import get_redis_client
+        redis = get_redis_client()
+        if redis:
+            existing = await redis.get(f"idempotency:payment:{idempotency_key}")
+            if existing:
+                return {"message": "Callback already processed", "idempotent": True}
+
     try:
         data = json.loads(raw.decode("utf-8"))
     except (json.JSONDecodeError, UnicodeDecodeError):
@@ -110,6 +163,14 @@ async def payment_callback(request: Request, db: AsyncSession = Depends(get_db))
         status=payload.status,
         approval_code=payload.approval_code,
     )
+
+    # Store idempotency key
+    if idempotency_key:
+        from app.core.redis_client import get_redis_client
+        redis = get_redis_client()
+        if redis:
+            await redis.setex(f"idempotency:payment:{idempotency_key}", 86400, "1")
+
     return {"message": "Callback received"}
 
 

@@ -18,13 +18,27 @@ class TransactionResponse(BaseModel):
     id: int
     reference: str
     type: str = Field(validation_alias="transaction_type")
-    status: str
+    status: str = Field(validation_alias="status")
     amount: float
     fee: float = Field(validation_alias="fee_amount")
     net_amount: float
     description: Optional[str]
     created_at: datetime
     completed_at: Optional[datetime]
+
+    @field_validator("type", mode="before")
+    @classmethod
+    def convert_type_enum(cls, v):
+        if hasattr(v, "value"):
+            return v.value
+        return str(v) if v else v
+
+    @field_validator("status", mode="before")
+    @classmethod
+    def convert_status_enum(cls, v):
+        if hasattr(v, "value"):
+            return v.value
+        return str(v) if v else v
 
 
 class WithdrawalRequest(BaseModel):

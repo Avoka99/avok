@@ -79,6 +79,8 @@ async def admin_dashboard(
 
 @router.get("/disputes/queue", response_model=List[AdminDisputeQueueItem])
 async def get_dispute_queue(
+    skip: int = 0,
+    limit: int = 50,
     current_user: User = Depends(get_current_admin),
     db: AsyncSession = Depends(get_db)
 ):
@@ -87,6 +89,8 @@ async def get_dispute_queue(
         select(Dispute)
         .options(selectinload(Dispute.order))
         .order_by(Dispute.created_at.desc())
+        .offset(skip)
+        .limit(limit)
     )
     disputes = result.scalars().all()
 

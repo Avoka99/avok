@@ -43,6 +43,9 @@ app.add_middleware(AuthStateMiddleware)
 @app.on_event("startup")
 async def startup_event():
     """Initialize on startup."""
+    if getattr(app.state, "skip_startup_db_init", False):
+        logger.info("Skipping startup database initialization")
+        return
     await init_db()
     logger.info("Application started")
 
